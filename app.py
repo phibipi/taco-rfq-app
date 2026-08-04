@@ -37,7 +37,8 @@ def login(email, password):
            uid = auth_res.user.id
            prof = sb.table("profiles").select("*").eq("id", uid).single().execute()
            return prof.data
-       except Exception:
+       except Exception as e:
+           st.error(f"DEBUG ERROR: {e}")
            return None
 
 
