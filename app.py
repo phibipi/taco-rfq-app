@@ -29,20 +29,26 @@ sb = get_client()
 # AUTH
 # =====================================================================
 def login(email, password):
-       try:
-           url = st.secrets["supabase"]["url"]
-           key = st.secrets["supabase"]["service_role_key"]
-           temp_client = create_client(url, key)
-           auth_res = temp_client.auth.sign_in_with_password({"email": email, "password": password})
-           uid = auth_res.user.id
-           prof = sb.table("profiles").select("*").eq("id", uid).single().execute()
-           return prof.data
-       except Exception as e:
-           st.error(f"DEBUG ERROR: {e}")
-           return None
+    try:
+        # Pakai koneksi TERPISAH (bukan `sb` yang global) khusus buat cek password.
+        # Ini supaya koneksi utama `sb` tetap punya akses penuh (service role)
+        # dan gak ke-downgrade jadi identitas user biasa setelah proses sign-in.
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["service_role_key"]
+        temp_client = create_client(url, key)
+        auth_res = temp_client.auth.sign_in_with_password({"email": email, "password": password})
+        uid = auth_res.user.id
+
+        # Baca data profile pakai koneksi utama `sb` (tetap full akses)
+        prof = sb.table("profiles").select("*").eq("id", uid).single().execute()
+        return prof.data
+    except Exception as e:
+        st.error(f"DEBUG ERROR: {e}")  # <-- sementara, buat lihat error aslinya
+        return None
 
 
-def register_vendor(name, email, password):
+def register_user(name, email, password, role):
+    """role: 'admin', 'proc', atau 'vendor'"""
     try:
         existing = sb.table("profiles").select("id").eq("email", email).execute()
         if existing.data:
@@ -52,16 +58,46 @@ def register_vendor(name, email, password):
         )
         uid = created.user.id
         sb.table("profiles").insert(
-            {"id": uid, "email": email, "role": "vendor", "vendor_name": name}
+            {"id": uid, "email": email, "role": role, "vendor_name": name}
         ).execute()
         return True, None
     except Exception as e:
         return False, str(e)
 
 
-def get_vendors():
-    res = sb.table("profiles").select("*").eq("role", "vendor").execute()
+def bulk_register_users(df, role):
+    """
+    df harus punya kolom 'name' dan 'email' (case-insensitive).
+    Password di-generate random per baris.
+    Return: DataFrame hasil (name, email, password, status)
+    """
+    import random
+    import string
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    results = []
+    for _, row in df.iterrows():
+        name = str(row.get("name", "")).strip()
+        email = str(row.get("email", "")).strip().lower()
+        if not name or not email or "@" not in email:
+            results.append({"name": name, "email": email, "password": "-", "status": "❌ Data tidak valid"})
+            continue
+        password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+        ok, err = register_user(name, email, password, role)
+        if ok:
+            results.append({"name": name, "email": email, "password": password, "status": "✅ Berhasil"})
+        else:
+            results.append({"name": name, "email": email, "password": "-", "status": f"❌ {err}"})
+    return pd.DataFrame(results)
+
+
+def get_users_by_role(role):
+    res = sb.table("profiles").select("*").eq("role", role).execute()
     return pd.DataFrame(res.data)
+
+
+def get_vendors():
+    return get_users_by_role("vendor")
 
 
 # =====================================================================
@@ -320,10 +356,62 @@ def show_login():
 
 
 # =====================================================================
-# UI: ADMIN
+# UI: PROC (PIC procurement — kerja harian RFQ)
 # =====================================================================
-def admin_portal():
-    tabs = st.tabs(["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History", "➕ Register Vendor"])
+def render_pr_list(df_source, already_published):
+    """Render list PR + checkbox item, dipakai buat tab Urgent & Normal."""
+    if df_source.empty:
+        st.info("Tidak ada item di kategori ini.")
+        return
+
+    for pr_no in df_source["PR CODE"].unique():
+        df_group = df_source[df_source["PR CODE"] == pr_no].reset_index(drop=True)
+        loc = df_group["LOCATION"].iloc[0] if "LOCATION" in df_group.columns else "-"
+        prio = str(df_group["PRIORITY STATUS"].iloc[0]) if "PRIORITY STATUS" in df_group.columns else "-"
+        label = f"📄 PR: {pr_no} | 📍 {loc}" + (" | 🚨 URGENT" if "URGENT" in prio.upper() else "")
+
+        with st.expander(label, expanded=st.session_state.get("expand_all", False)):
+            cA, cB, _ = st.columns([1, 1, 3])
+            if cA.button("✅ Pilih Semua", key=f"all_{pr_no}"):
+                for k in df_group["ROW_KEY"]:
+                    st.session_state["selected_items_dict"][k] = True
+                st.rerun()
+            if cB.button("🗑️ Hapus Semua", key=f"none_{pr_no}"):
+                for k in df_group["ROW_KEY"]:
+                    st.session_state["selected_items_dict"][k] = False
+                st.rerun()
+
+            h1, h2, h3, h4, h5 = st.columns([0.5, 3, 3, 1, 1])
+            h1.markdown("**✓**")
+            h2.markdown("**Description**")
+            h3.markdown("**Description 2**")
+            h4.markdown("**Qty**")
+            h5.markdown("**UOM**")
+
+            for _, item_row in df_group.iterrows():
+                row_key = item_row["ROW_KEY"]
+                match_key = (str(item_row.get("DESCRIPTION", "")).strip().lower(), str(item_row.get("DESCRIPTION 2", "")).strip().lower())
+                is_published = match_key in already_published
+                bg = "#d1fae5" if is_published else "transparent"
+
+                c1, c2, c3, c4, c5 = st.columns([0.5, 3, 3, 1, 1])
+                with st.container():
+                    st.markdown(f'<div style="background-color:{bg}; padding:4px; border-radius:4px;">', unsafe_allow_html=True)
+                    checked = c1.checkbox(
+                        "sel", key=f"chk_{row_key}",
+                        value=st.session_state["selected_items_dict"].get(row_key, False),
+                        label_visibility="collapsed",
+                    )
+                    st.session_state["selected_items_dict"][row_key] = checked
+                    c2.write(item_row.get("DESCRIPTION", ""))
+                    c3.write(item_row.get("DESCRIPTION 2", ""))
+                    c4.write(item_row.get("QUANTITY", ""))
+                    c5.write(item_row.get("UOM", ""))
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def proc_portal():
+    tabs = st.tabs(["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History"])
     already_published = get_already_published_keys()
 
     with tabs[0]:
@@ -339,6 +427,8 @@ def admin_portal():
 
             if "selected_items_dict" not in st.session_state:
                 st.session_state["selected_items_dict"] = {}
+            if "expand_all" not in st.session_state:
+                st.session_state["expand_all"] = False
 
             df_display = df_raw.copy()
             if "STATUS" in df_raw.columns and "QUANTITY" in df_raw.columns:
@@ -360,43 +450,27 @@ def admin_portal():
                     )
                     df_to_show = df_to_show[mask]
 
-                for pr_no in df_to_show["PR CODE"].unique():
-                    df_group = df_to_show[df_to_show["PR CODE"] == pr_no].reset_index(drop=True)
-                    loc = df_group["LOCATION"].iloc[0] if "LOCATION" in df_group.columns else "-"
-                    prio = str(df_group["PRIORITY STATUS"].iloc[0]) if "PRIORITY STATUS" in df_group.columns else "-"
-                    label = f"📄 PR: {pr_no} | 📍 {loc}" + (" | 🚨 URGENT" if "URGENT" in prio.upper() else "")
+                col_exp, _ = st.columns([1, 4])
+                if col_exp.button("📂 Collapse All" if st.session_state["expand_all"] else "📂 Expand All", use_container_width=True):
+                    st.session_state["expand_all"] = not st.session_state["expand_all"]
+                    st.rerun()
 
-                    with st.expander(label, expanded=False):
-                        cA, cB, _ = st.columns([1, 1, 3])
-                        if cA.button("✅ Pilih Semua", key=f"all_{pr_no}"):
-                            for k in df_group["ROW_KEY"]:
-                                st.session_state["selected_items_dict"][k] = True
-                            st.rerun()
-                        if cB.button("🗑️ Hapus Semua", key=f"none_{pr_no}"):
-                            for k in df_group["ROW_KEY"]:
-                                st.session_state["selected_items_dict"][k] = False
-                            st.rerun()
+                sub_tab_urgent, sub_tab_normal = st.tabs(["🚨 Urgent Items", "📦 Normal Items"])
 
-                        for _, item_row in df_group.iterrows():
-                            row_key = item_row["ROW_KEY"]
-                            match_key = (str(item_row.get("DESCRIPTION", "")).strip().lower(), str(item_row.get("DESCRIPTION 2", "")).strip().lower())
-                            is_published = match_key in already_published
-                            bg = "#d1fae5" if is_published else "transparent"
+                if "PRIORITY STATUS" in df_to_show.columns:
+                    df_urgent = df_to_show[df_to_show["PRIORITY STATUS"].astype(str).str.upper().str.contains("URGENT", na=False)]
+                    df_normal = df_to_show[~df_to_show["PRIORITY STATUS"].astype(str).str.upper().str.contains("URGENT", na=False)]
+                else:
+                    df_urgent = pd.DataFrame()
+                    df_normal = df_to_show.copy()
 
-                            c1, c2, c3, c4, c5 = st.columns([0.5, 3, 3, 1, 1])
-                            with st.container():
-                                st.markdown(f'<div style="background-color:{bg}; padding:4px; border-radius:4px;">', unsafe_allow_html=True)
-                                checked = c1.checkbox(
-                                    "sel", key=f"chk_{row_key}",
-                                    value=st.session_state["selected_items_dict"].get(row_key, False),
-                                    label_visibility="collapsed",
-                                )
-                                st.session_state["selected_items_dict"][row_key] = checked
-                                c2.write(item_row.get("DESCRIPTION", ""))
-                                c3.write(item_row.get("DESCRIPTION 2", ""))
-                                c4.write(item_row.get("QUANTITY", ""))
-                                c5.write(item_row.get("UOM", ""))
-                                st.markdown("</div>", unsafe_allow_html=True)
+                with sub_tab_urgent:
+                    with st.container(height=500, border=True):
+                        render_pr_list(df_urgent, already_published)
+
+                with sub_tab_normal:
+                    with st.container(height=500, border=True):
+                        render_pr_list(df_normal, already_published)
 
                 st.divider()
                 st.subheader("🎯 Review & Assign Vendor")
@@ -489,23 +563,95 @@ def admin_portal():
         else:
             st.dataframe(df_hist, hide_index=True, use_container_width=True)
 
-    with tabs[3]:
-        st.header("➕ Daftarkan Vendor Baru")
-        with st.form("form_register_vendor", clear_on_submit=True):
-            v_name = st.text_input("Nama Vendor").strip()
-            v_email = st.text_input("Email Vendor").strip().lower()
-            auto_password = datetime.now().strftime("%Y%m%d")
-            st.info(f"🔑 Password akun vendor otomatis: `{auto_password}`")
-            submitted = st.form_submit_button("Simpan Vendor Baru", type="primary")
-            if submitted:
-                if not v_name or not v_email or "@" not in v_email:
-                    st.error("❌ Nama/Email tidak valid.")
-                else:
-                    ok, err = register_vendor(v_name, v_email, auto_password)
-                    if ok:
-                        st.success(f"🎉 Vendor {v_name} berhasil didaftarkan.")
+
+# =====================================================================
+# UI: ADMIN (khusus urus akun — TIDAK ikut kerjaan RFQ harian)
+# =====================================================================
+def admin_portal():
+    tabs = st.tabs(["➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User"])
+
+    with tabs[0]:
+        st.header("Daftarkan PIC Procurement")
+        st.caption("PIC yang didaftarkan di sini akan punya akses ke Import PR, Publish RFQ, Comparison & History — TAPI tidak bisa daftarin user baru.")
+
+        sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
+        with sub1:
+            with st.form("form_register_pic", clear_on_submit=True):
+                p_name = st.text_input("Nama PIC").strip()
+                p_email = st.text_input("Email PIC").strip().lower()
+                submitted = st.form_submit_button("Simpan PIC Baru", type="primary")
+                if submitted:
+                    if not p_name or not p_email or "@" not in p_email:
+                        st.error("❌ Nama/Email tidak valid.")
                     else:
-                        st.error(f"❌ Gagal: {err}")
+                        import random, string
+                        auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                        ok, err = register_user(p_name, p_email, auto_password, "proc")
+                        if ok:
+                            st.success(f"🎉 PIC {p_name} berhasil didaftarkan.")
+                            st.info(f"🔑 Password: `{auto_password}` — catat & kirim manual ke PIC ybs, ini cuma muncul sekali.")
+                        else:
+                            st.error(f"❌ Gagal: {err}")
+
+        with sub2:
+            st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email** (1 baris = 1 PIC).")
+            bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_pic")
+            if bulk_file is not None:
+                df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
+                st.dataframe(df_bulk, use_container_width=True, hide_index=True)
+                if st.button("🚀 Daftarkan Semua PIC Ini", type="primary"):
+                    with st.spinner("Mendaftarkan..."):
+                        result_df = bulk_register_users(df_bulk, "proc")
+                    st.success("Selesai! Cek hasil & password di tabel bawah (SIMPAN sekarang, tidak muncul lagi).")
+                    st.dataframe(result_df, use_container_width=True, hide_index=True)
+                    csv = result_df.to_csv(index=False).encode("utf-8")
+                    st.download_button("📥 Download Hasil (CSV, berisi password)", csv, "hasil_daftar_pic.csv")
+
+    with tabs[1]:
+        st.header("Daftarkan Vendor")
+        sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
+        with sub1:
+            with st.form("form_register_vendor", clear_on_submit=True):
+                v_name = st.text_input("Nama Vendor").strip()
+                v_email = st.text_input("Email Vendor").strip().lower()
+                submitted = st.form_submit_button("Simpan Vendor Baru", type="primary")
+                if submitted:
+                    if not v_name or not v_email or "@" not in v_email:
+                        st.error("❌ Nama/Email tidak valid.")
+                    else:
+                        import random, string
+                        auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                        ok, err = register_user(v_name, v_email, auto_password, "vendor")
+                        if ok:
+                            st.success(f"🎉 Vendor {v_name} berhasil didaftarkan.")
+                            st.info(f"🔑 Password: `{auto_password}` — catat & kirim manual ke vendor ybs, ini cuma muncul sekali.")
+                        else:
+                            st.error(f"❌ Gagal: {err}")
+
+        with sub2:
+            st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email** (1 baris = 1 vendor).")
+            bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_vendor")
+            if bulk_file is not None:
+                df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
+                st.dataframe(df_bulk, use_container_width=True, hide_index=True)
+                if st.button("🚀 Daftarkan Semua Vendor Ini", type="primary"):
+                    with st.spinner("Mendaftarkan..."):
+                        result_df = bulk_register_users(df_bulk, "vendor")
+                    st.success("Selesai! Cek hasil & password di tabel bawah (SIMPAN sekarang, tidak muncul lagi).")
+                    st.dataframe(result_df, use_container_width=True, hide_index=True)
+                    csv = result_df.to_csv(index=False).encode("utf-8")
+                    st.download_button("📥 Download Hasil (CSV, berisi password)", csv, "hasil_daftar_vendor.csv")
+
+    with tabs[2]:
+        st.header("👥 Daftar Semua User")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**PIC Procurement**")
+            st.dataframe(get_users_by_role("proc")[["email", "vendor_name", "created_at"]] if not get_users_by_role("proc").empty else pd.DataFrame(), hide_index=True, use_container_width=True)
+        with c2:
+            st.markdown("**Vendor**")
+            df_v = get_vendors()
+            st.dataframe(df_v[["email", "vendor_name", "created_at"]] if not df_v.empty else pd.DataFrame(), hide_index=True, use_container_width=True)
 
 
 # =====================================================================
@@ -587,6 +733,8 @@ def main():
 
     if user["role"] == "admin":
         admin_portal()
+    elif user["role"] == "proc":
+        proc_portal()
     else:
         vendor_portal(user["id"])
 
