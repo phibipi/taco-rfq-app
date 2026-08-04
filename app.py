@@ -29,13 +29,16 @@ sb = get_client()
 # AUTH
 # =====================================================================
 def login(email, password):
-    try:
-        auth_res = sb.auth.sign_in_with_password({"email": email, "password": password})
-        uid = auth_res.user.id
-        prof = sb.table("profiles").select("*").eq("id", uid).single().execute()
-        return prof.data
-    except Exception:
-        return None
+       try:
+           url = st.secrets["supabase"]["url"]
+           key = st.secrets["supabase"]["service_role_key"]
+           temp_client = create_client(url, key)
+           auth_res = temp_client.auth.sign_in_with_password({"email": email, "password": password})
+           uid = auth_res.user.id
+           prof = sb.table("profiles").select("*").eq("id", uid).single().execute()
+           return prof.data
+       except Exception:
+           return None
 
 
 def register_vendor(name, email, password):
