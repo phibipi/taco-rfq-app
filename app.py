@@ -511,8 +511,9 @@ def render_pr_list(df_source, already_published):
                     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def proc_portal():
-    tabs = st.tabs(["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History"])
+def proc_portal(tabs=None):
+    if tabs is None:
+        tabs = st.tabs(["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History"])
     already_published = get_already_published_keys()
 
     with tabs[0]:
@@ -705,8 +706,9 @@ def proc_portal():
 # =====================================================================
 # UI: ADMIN (khusus urus akun — TIDAK ikut kerjaan RFQ harian)
 # =====================================================================
-def admin_portal():
-    tabs = st.tabs(["➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User"])
+def admin_portal(tabs=None):
+    if tabs is None:
+        tabs = st.tabs(["➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User", "🔑 Reset Password"])
 
     with tabs[0]:
         st.header("Daftarkan PIC Procurement")
@@ -791,6 +793,41 @@ def admin_portal():
             df_v = get_vendors()
             st.dataframe(df_v[["email", "vendor_name", "created_at"]] if not df_v.empty else pd.DataFrame(), hide_index=True, use_container_width=True)
 
+    with tabs[3]:
+        st.header("🔑 Reset Password User")
+        st.caption("Reset password untuk PIC maupun Vendor yang lupa password atau butuh password baru.")
+
+        df_proc = get_users_by_role("proc")
+        df_vend = get_vendors()
+        df_all = pd.concat([df_proc, df_vend], ignore_index=True) if not df_proc.empty or not df_vend.empty else pd.DataFrame()
+
+        if df_all.empty:
+            st.info("Belum ada user terdaftar.")
+        else:
+            df_all["label"] = df_all["vendor_name"].fillna("-") + " (" + df_all["email"] + ") — " + df_all["role"]
+            sel_label = st.selectbox("Pilih User:", df_all["label"])
+            sel_row = df_all[df_all["label"] == sel_label].iloc[0]
+
+            mode = st.radio("Password baru:", ["Generate otomatis (random)", "Ketik manual"])
+            if mode == "Ketik manual":
+                new_pw = st.text_input("Password baru (min. 6 karakter):", type="password")
+            else:
+                new_pw = None
+
+            if st.button("🔄 Reset Password", type="primary"):
+                import random, string
+                final_pw = new_pw if mode == "Ketik manual" else "".join(random.choices(string.ascii_letters + string.digits, k=10))
+
+                if mode == "Ketik manual" and (not new_pw or len(new_pw) < 6):
+                    st.error("❌ Password minimal 6 karakter.")
+                else:
+                    ok, err = reset_user_password(sel_row["id"], final_pw)
+                    if ok:
+                        st.success(f"🎉 Password untuk **{sel_row['email']}** berhasil direset.")
+                        st.info(f"🔑 Password baru: `{final_pw}` — catat & kirim manual ke user ybs, ini cuma muncul sekali.")
+                    else:
+                        st.error(f"❌ Gagal: {err}")
+
 
 # =====================================================================
 # UI: VENDOR
@@ -859,6 +896,16 @@ def vendor_portal(vendor_id):
                 st.rerun()
 
 
+def combined_admin_portal():
+    """Dipakai untuk role 'admin' yang JUGA merangkap kerjaan PIC (misal: Phoebe)."""
+    all_tabs = st.tabs([
+        "📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History",
+        "➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User", "🔑 Reset Password",
+    ])
+    proc_portal(tabs=all_tabs[0:3])
+    admin_portal(tabs=all_tabs[3:7])
+
+
 # =====================================================================
 # MAIN
 # =====================================================================
@@ -884,7 +931,7 @@ def main():
     st.divider()
 
     if user["role"] == "admin":
-        admin_portal()
+        combined_admin_portal()
     elif user["role"] == "proc":
         proc_portal()
     else:
