@@ -864,7 +864,7 @@ def proc_portal(tabs=None):
 
                     st.divider()
                     st.markdown("##### 🤖 Tanya AI soal perbandingan ini")
-                    render_ai_chat(pivot_items, rfq_title_active)
+                    render_ai_insight(pivot_items, rfq_title_active)
 
     # TAB 3: HISTORY
     with tabs[2]:
