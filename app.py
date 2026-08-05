@@ -397,7 +397,7 @@ def send_rfq_email(vendor_email, vendor_name, pr_code, deadline_str, items_text,
 
 
 # =====================================================================
-# AI ASSISTANT (Gemini 1.5 Flash Fix)
+# AI ASSISTANT (Gemini Fix)
 # =====================================================================
 def render_ai_chat(df_display, rfq_title):
     if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
@@ -437,8 +437,8 @@ Pertanyaan PIC: {question}
 Jawab singkat, jelas, dan actionable dalam Bahasa Indonesia."""
 
         try:
-            # FIX model name
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            # FIX: Menggunakan gemini-1.5-flash-latest atau gemini-1.5-pro-latest
+            model = genai.GenerativeModel("gemini-1.5-flash-latest")
             with st.chat_message("assistant"):
                 with st.spinner("Mikir..."):
                     response = model.generate_content(prompt)
@@ -446,7 +446,17 @@ Jawab singkat, jelas, dan actionable dalam Bahasa Indonesia."""
                     st.markdown(answer)
             st.session_state[chat_key].append({"role": "assistant", "content": answer})
         except Exception as e:
-            st.error(f"Gagal menghubungi Gemini: {e}")
+            # Fallback otomatis ke model stabil jika nama alias gagal
+            try:
+                model = genai.GenerativeModel("gemini-1.5-pro")
+                with st.chat_message("assistant"):
+                    with st.spinner("Mikir..."):
+                        response = model.generate_content(prompt)
+                        answer = response.text
+                        st.markdown(answer)
+                st.session_state[chat_key].append({"role": "assistant", "content": answer})
+            except Exception as ex:
+                st.error(f"Gagal menghubungi Gemini: {ex}")
 
 
 
