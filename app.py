@@ -397,7 +397,7 @@ def send_rfq_email(vendor_email, vendor_name, pr_code, deadline_str, items_text,
 
 
 # =====================================================================
-# AI ASSISTANT (Gemini Auto-Select Fix)
+# AI ASSISTANT (Gemini Fix)
 # =====================================================================
 def render_ai_chat(df_display, rfq_title):
     if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
@@ -410,7 +410,8 @@ def render_ai_chat(df_display, rfq_title):
         st.caption("⚠️ Library `google-generativeai` belum terinstall. Tambahkan ke requirements.txt.")
         return
 
-    genai.configure(api_key=st.secrets["gemini"]["api_key"])
+    api_key = st.secrets["gemini"]["api_key"].strip()
+    genai.configure(api_key=api_key)
 
     chat_key = f"ai_chat_{rfq_title}"
     if chat_key not in st.session_state:
@@ -436,45 +437,38 @@ Pertanyaan PIC: {question}
 
 Jawab singkat, jelas, dan actionable dalam Bahasa Indonesia."""
 
-        try:
-            # FIX: Deteksi otomatis model yang support generateContent di akun/API key kamu
-            available_models = [
-                m.name for m in genai.list_models() 
-                if "generateContent" in m.supported_generation_methods
-            ]
-            
-            # Cari model flash/pro terbaik yang tersedia
-            selected_model = None
-            preferred_order = [
-                "models/gemini-2.0-flash",
-                "models/gemini-2.5-flash",
-                "models/gemini-1.5-flash",
-                "models/gemini-1.5-pro",
-                "models/gemini-1.5-flash-8b"
-            ]
-            
-            for pref in preferred_order:
-                if pref in available_models:
-                    selected_model = pref
-                    break
-            
-            # Jika tidak ada di daftar prioritas, pakai model pertama yang tersedia
-            if not selected_model and available_models:
-                selected_model = available_models[0]
+        # Daftar model yang dicoba secara berurutan
+        candidate_models = [
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-2.0-flash-exp",
+            "gemini-1.5-pro",
+        ]
 
-            if not selected_model:
-                st.error("Gagal menemukan model Gemini yang aktif di API Key ini.")
-                return
+        answer = None
+        last_err = None
 
-            model = genai.GenerativeModel(selected_model)
-            with st.chat_message("assistant"):
-                with st.spinner("Mikir..."):
-                    response = model.generate_content(prompt)
-                    answer = response.text
-                    st.markdown(answer)
-            st.session_state[chat_key].append({"role": "assistant", "content": answer})
-        except Exception as e:
-            st.error(f"Gagal menghubungi Gemini: {e}")
+        with st.chat_message("assistant"):
+            with st.spinner("Mikir..."):
+                for m_name in candidate_models:
+                    try:
+                        model = genai.GenerativeModel(m_name)
+                        res = model.generate_content(prompt)
+                        if res and res.text:
+                            answer = res.text
+                            break
+                    except Exception as e:
+                        last_err = str(e)
+                        continue
+
+            if answer:
+                st.markdown(answer)
+                st.session_state[chat_key].append({"role": "assistant", "content": answer})
+            else:
+                if "429" in str(last_err) or "quota" in str(last_err).lower():
+                    st.warning("⏳ Kuota API Gemini kamu sedang cooldown. Silakan coba klik tombol kirim lagi dalam 10-20 detik.")
+                else:
+                    st.error(f"Gagal memproses AI: {last_err}")
 
 
 
