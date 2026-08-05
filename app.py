@@ -42,8 +42,7 @@ def login(email, password):
         # Baca data profile pakai koneksi utama `sb` (tetap full akses)
         prof = sb.table("profiles").select("*").eq("id", uid).single().execute()
         return prof.data
-    except Exception as e:
-        st.error(f"DEBUG ERROR: {e}")  # <-- sementara, buat lihat error aslinya
+    except Exception:
         return None
 
 
@@ -94,6 +93,14 @@ def bulk_register_users(df, role):
 def get_users_by_role(role):
     res = sb.table("profiles").select("*").eq("role", role).execute()
     return pd.DataFrame(res.data)
+
+
+def reset_user_password(user_id, new_password):
+    try:
+        sb.auth.admin.update_user_by_id(user_id, {"password": new_password})
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 def get_vendors():
@@ -202,7 +209,7 @@ def publish_rfq(pr_code, location, priority, admin_id, items_df, vendor_ids,
 def get_price_comparison_data():
     res = (
         sb.table("quotes")
-        .select("unit_price, brand, lead_time_days, rfq_assignments(pr_items(description, description2, quantity, uom, purchase_requests(pr_code)), profiles(vendor_name, email))")
+        .select("unit_price, brand, lead_time_days, ready_stock, rfq_assignments(pr_items(description, description2, quantity, uom, purchase_requests(pr_code)), profiles(vendor_name, email, top_days))")
         .execute()
     )
     rows = []
@@ -222,9 +229,52 @@ def get_price_comparison_data():
                 "unit_price": r.get("unit_price"),
                 "brand": r.get("brand"),
                 "lead_time_days": r.get("lead_time_days"),
+                "ready_stock": r.get("ready_stock", "Tidak"),
+                "top_days": vendor.get("top_days") or 0,
             }
         )
     return pd.DataFrame(rows)
+
+
+def compute_recommendation(df_item, w_price, w_top, w_stock, w_leadtime):
+    """
+    df_item: baris-baris quote untuk SATU item (dari beberapa vendor).
+    Mengembalikan df_item + kolom 'score' (0-100, makin tinggi makin direkomendasikan) + 'is_recommended'.
+    Normalisasi per-item: harga makin murah makin baik, TOP makin panjang makin baik,
+    ready stock 'Ya' dapat nilai penuh, lead time makin pendek makin baik.
+    """
+    d = df_item.copy()
+    if d.empty:
+        return d
+
+    def norm_lower_better(s):
+        s = pd.to_numeric(s, errors="coerce")
+        if s.max() == s.min() or s.isna().all():
+            return pd.Series([100.0] * len(s), index=s.index)
+        return 100 * (s.max() - s) / (s.max() - s.min())
+
+    def norm_higher_better(s):
+        s = pd.to_numeric(s, errors="coerce")
+        if s.max() == s.min() or s.isna().all():
+            return pd.Series([100.0] * len(s), index=s.index)
+        return 100 * (s - s.min()) / (s.max() - s.min())
+
+    price_score = norm_lower_better(d["unit_price"])
+    top_score = norm_higher_better(d["top_days"])
+    leadtime_score = norm_lower_better(d["lead_time_days"])
+    stock_score = d["ready_stock"].apply(lambda x: 100.0 if str(x).strip().lower() == "ya" else 0.0)
+
+    total_w = max(w_price + w_top + w_stock + w_leadtime, 1)
+    d["score"] = (
+        price_score * w_price + top_score * w_top + stock_score * w_stock + leadtime_score * w_leadtime
+    ) / total_w
+    d["score"] = d["score"].round(1)
+    d["is_recommended"] = d["score"] == d["score"].max()
+    return d
+
+
+def update_vendor_top(vendor_id, top_days):
+    sb.table("profiles").update({"top_days": top_days}).eq("id", vendor_id).execute()
 
 
 def get_history_data():
@@ -274,7 +324,7 @@ def get_pr_attachments(pr_id):
     return res.data
 
 
-def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days):
+def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock):
     sb.table("quotes").insert(
         {
             "assignment_id": assignment_id,
@@ -282,6 +332,7 @@ def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days):
             "unit_price": unit_price,
             "brand": brand,
             "lead_time_days": lead_time_days,
+            "ready_stock": ready_stock,
         }
     ).execute()
 
@@ -337,8 +388,58 @@ def send_rfq_email(vendor_email, vendor_name, pr_code, deadline_str, items_text,
 
 
 # =====================================================================
-# UI: LOGIN
+# AI ASSISTANT (Gemini)
 # =====================================================================
+def render_ai_chat(df_display, pr_code):
+    if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
+        st.caption("💡 Fitur AI belum aktif — tambahkan `gemini.api_key` di secrets untuk mengaktifkan.")
+        return
+
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        st.caption("⚠️ Library `google-generativeai` belum terinstall. Tambahkan ke requirements.txt.")
+        return
+
+    genai.configure(api_key=st.secrets["gemini"]["api_key"])
+
+    chat_key = f"ai_chat_{pr_code}"
+    if chat_key not in st.session_state:
+        st.session_state[chat_key] = []
+
+    for msg in st.session_state[chat_key]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    question = st.chat_input("Contoh: vendor mana paling worth it buat item pertama?")
+    if question:
+        st.session_state[chat_key].append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        context_table = df_display.to_csv(index=False)
+        prompt = f"""Kamu adalah asisten procurement yang membantu PIC menganalisis perbandingan harga vendor.
+Berikut data perbandingan untuk PR {pr_code} (kolom Skor: makin tinggi makin direkomendasikan, ⭐ Rekomendasi=True berarti vendor terbaik untuk item itu berdasarkan bobot yang dipilih PIC):
+
+{context_table}
+
+Pertanyaan PIC: {question}
+
+Jawab singkat, jelas, dan actionable dalam Bahasa Indonesia. Kalau relevan, sebut nama vendor dan angka konkret dari data di atas. Jangan mengarang data yang tidak ada di tabel."""
+
+        try:
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            with st.chat_message("assistant"):
+                with st.spinner("Mikir..."):
+                    response = model.generate_content(prompt)
+                    answer = response.text
+                    st.markdown(answer)
+            st.session_state[chat_key].append({"role": "assistant", "content": answer})
+        except Exception as e:
+            st.error(f"Gagal menghubungi Gemini: {e}")
+
+
+
 def show_login():
     st.title("🛠️ TACO Sparepart RFQ")
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -539,21 +640,58 @@ def proc_portal():
                                 st.rerun()
 
     with tabs[1]:
-        st.header("Price Comparison Analysis")
+        st.header("Price Comparison & Rekomendasi Vendor")
         df_prices = get_price_comparison_data()
         if df_prices.empty:
             st.info("Belum ada penawaran masuk dari vendor.")
         else:
             pr_list = df_prices["pr_code"].dropna().unique()
             sel_pr = st.selectbox("Pilih Nomor PR:", pr_list)
-            sub = df_prices[df_prices["pr_code"] == sel_pr]
-            pivot = sub.pivot_table(index=["description", "description2", "qty", "uom"], columns="vendor", values="unit_price", aggfunc="min").reset_index()
-            id_cols = ["description", "description2", "qty", "uom"]
-            price_cols = [c for c in pivot.columns if c not in id_cols]
-            if price_cols:
-                st.dataframe(pivot.style.highlight_min(axis=1, color="#d1fae5", subset=price_cols), use_container_width=True)
-            else:
-                st.dataframe(pivot, use_container_width=True)
+            sub = df_prices[df_prices["pr_code"] == sel_pr].copy()
+
+            st.markdown("##### ⚖️ Bobot Prioritas (total otomatis dinormalisasi)")
+            c1, c2, c3, c4 = st.columns(4)
+            w_price = c1.slider("💰 Harga", 0, 100, 40)
+            w_top = c2.slider("📅 TOP", 0, 100, 25)
+            w_stock = c3.slider("📦 Ready Stock", 0, 100, 20)
+            w_leadtime = c4.slider("⏱️ Lead Time", 0, 100, 15)
+
+            # Hitung rekomendasi per item (grouping description+description2+qty+uom)
+            result_frames = []
+            for keys, grp in sub.groupby(["description", "description2", "qty", "uom"], dropna=False):
+                scored = compute_recommendation(grp, w_price, w_top, w_stock, w_leadtime)
+                result_frames.append(scored)
+            df_scored = pd.concat(result_frames, ignore_index=True) if result_frames else sub
+
+            st.markdown("##### 🏆 Rekomendasi per Item")
+            display_cols = ["description", "description2", "qty", "uom", "vendor", "unit_price", "top_days", "ready_stock", "lead_time_days", "score", "is_recommended"]
+            df_display = df_scored[display_cols].rename(columns={
+                "description": "Deskripsi", "description2": "Deskripsi 2", "qty": "Qty", "uom": "UOM",
+                "vendor": "Vendor", "unit_price": "Harga", "top_days": "TOP (hari)",
+                "ready_stock": "Ready Stock", "lead_time_days": "Lead Time (hari)",
+                "score": "Skor", "is_recommended": "⭐ Rekomendasi",
+            }).sort_values(["Deskripsi", "Skor"], ascending=[True, False])
+
+            def highlight_recommended(row):
+                return ["background-color: #d1fae5" if row["⭐ Rekomendasi"] else "" for _ in row]
+
+            st.dataframe(df_display.style.apply(highlight_recommended, axis=1), use_container_width=True, hide_index=True)
+
+            # Download Excel
+            import io
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df_display.to_excel(writer, index=False, sheet_name="Comparison")
+            st.download_button(
+                "📥 Download Comparison Sheet (Excel)",
+                output.getvalue(),
+                f"Comparison_{sel_pr}.xlsx",
+                use_container_width=True,
+            )
+
+            st.divider()
+            st.markdown("##### 🤖 Tanya AI soal perbandingan ini")
+            render_ai_chat(df_display, sel_pr)
 
     with tabs[2]:
         st.header("🔍 History RFQ")
@@ -659,6 +797,16 @@ def admin_portal():
 # =====================================================================
 def vendor_portal(vendor_id):
     st.header("📝 Form Penawaran Harga")
+
+    with st.expander("⚙️ Data Vendor Saya (Term of Payment)"):
+        prof = sb.table("profiles").select("top_days").eq("id", vendor_id).single().execute()
+        current_top = (prof.data or {}).get("top_days") or 0
+        new_top = st.number_input("TOP / Term of Payment (hari)", min_value=0, value=int(current_top), step=1)
+        if st.button("Simpan TOP"):
+            update_vendor_top(vendor_id, new_top)
+            st.success("TOP berhasil disimpan.")
+            st.rerun()
+
     assignments = get_vendor_assignments(vendor_id)
     if not assignments:
         st.info("Tidak ada permintaan RFQ untuk Anda.")
@@ -692,17 +840,21 @@ def vendor_portal(vendor_id):
                     "uom": item.get("uom"),
                     "Unit_Price": 0.0,
                     "Brand": "-",
+                    "Ready_Stock": "Ya",
                     "Lead_Time_Days": 7,
                 })
             df_form = pd.DataFrame(table_rows)
             edited = st.data_editor(
                 df_form, key=f"edit_{pr_code}", hide_index=True, use_container_width=True,
                 disabled=["assignment_id", "description", "description2", "qty", "uom"],
+                column_config={
+                    "Ready_Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=True),
+                },
             )
 
             if st.button(f"Kirim Penawaran PR {pr_code}", key=f"save_{pr_code}"):
                 for _, r in edited.iterrows():
-                    submit_quote(r["assignment_id"], vendor_id, r["Unit_Price"], r["Brand"], r["Lead_Time_Days"])
+                    submit_quote(r["assignment_id"], vendor_id, r["Unit_Price"], r["Brand"], r["Lead_Time_Days"], r["Ready_Stock"])
                 st.success(f"🎉 Penawaran untuk PR {pr_code} berhasil dikirim!")
                 st.rerun()
 
