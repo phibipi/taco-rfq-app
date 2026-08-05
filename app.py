@@ -1,12 +1,16 @@
-import streamlit as st
-import pandas as pd
-from supabase import create_client, Client
+import io
+import random
+import string
 from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
+
+import pandas as pd
+import streamlit as st
+from supabase import create_client, Client
 
 # =====================================================================
 # CONFIG
