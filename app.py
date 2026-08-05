@@ -397,92 +397,95 @@ def send_rfq_email(vendor_email, vendor_name, pr_code, deadline_str, items_text,
 
 
 # =====================================================================
-# AI ASSISTANT (Auto-Detect Model Fix)
+# AI EXECUTIVE INSIGHT (AUTOMATIC ANALYSIS)
 # =====================================================================
-def render_ai_chat(df_display, rfq_title):
+def render_ai_insight(df_display, rfq_title):
     if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
-        st.caption("💡 Fitur AI belum aktif — tambahkan `gemini.api_key` di secrets untuk mengaktifkan.")
+        st.caption("💡 Fitur AI belum aktif — tambahkan `gemini.api_key` di secrets.")
         return
 
     try:
         import google.generativeai as genai
     except ImportError:
-        st.caption("⚠️ Library `google-generativeai` belum terinstall. Tambahkan ke requirements.txt.")
+        st.caption("⚠️ Library `google-generativeai` belum terinstall.")
         return
 
     api_key = st.secrets["gemini"]["api_key"].strip()
     genai.configure(api_key=api_key)
 
-    chat_key = f"ai_chat_{rfq_title}"
-    if chat_key not in st.session_state:
-        st.session_state[chat_key] = []
+    st.markdown("### 🤖 Executive AI Procurement Insight")
+    
+    insight_key = f"ai_insight_{rfq_title}"
+    
+    # Tombol untuk trigger atau re-generate analisis AI
+    col_a, _ = st.columns([1, 3])
+    btn_generate = col_a.button("✨ Analisis Ulang AI", key=f"btn_ai_{rfq_title}")
 
-    for msg in st.session_state[chat_key]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    question = st.chat_input("Contoh: vendor mana paling murah & recommended?")
-    if question:
-        st.session_state[chat_key].append({"role": "user", "content": question})
-        with st.chat_message("user"):
-            st.markdown(question)
-
+    # Jalankan jika belum ada hasil analisis atau jika tombol di-klik
+    if btn_generate or insight_key not in st.session_state:
         context_table = df_display.to_csv(index=False)
-        prompt = f"""Kamu adalah asisten procurement yang membantu PIC menganalisis perbandingan harga vendor.
-Berikut data perbandingan untuk RFQ: {rfq_title}:
+        
+        # SYSTEM PROMPT DIPAKSA DI BELAKANG LAYAR
+        prompt = f"""Kamu adalah Senior Procurement Specialist & Cost Analyst untuk TACO Group.
+Analisis data perbandingan penawaran vendor berikut untuk RFQ: {rfq_title}
 
+DATA PERBANDINGAN:
 {context_table}
 
-Pertanyaan PIC: {question}
+Tugasmu adalah memberikan analisis otomatis tanpa perlu ditanya.
+SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADING & BULLET POINT KONSISTEN):
 
-Jawab singkat, jelas, dan actionable dalam Bahasa Indonesia."""
+### 💡 Rekomendasi Merk Alternative:
+(Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item di atas, cantumkan estimasi harga pasar & keunggulannya)
 
-        answer = None
-        last_err = None
+### ⚠️ Catatan Penting Procurement (Alert):
+(Sorot jika ada vendor yang harganya terindikasi jauh diatas harga pasar/overpriced/typo kuantitas, atau lead time terlalu lama)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Mikir..."):
-                try:
-                    # 1. Ambil daftar model aktual dari API Google yang support generateContent
-                    active_models = [
-                        m.name for m in genai.list_models()
-                        if "generateContent" in m.supported_generation_methods
-                    ]
+### 🎯 Action Plan PIC:
+(Berikan langkah konkret 1, 2, 3 untuk PIC Procurement, misal: klarifikasi typo, negosiasi target harga, atau minta RFQ ulang merk alternatif)
 
-                    # 2. Prioritaskan model flash/pro yang terdeteksi
-                    candidate_models = []
-                    # Masukkan model hasil deteksi resmi lebih dulu
-                    for target in ["flash", "pro"]:
-                        candidate_models.extend([m for m in active_models if target in m])
-                    # Tambahkan sisa model aktif lainnya sebagai cadangan
-                    candidate_models.extend([m for m in active_models if m not in candidate_models])
+Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
+"""
 
-                    if not candidate_models:
-                        candidate_models = ["models/gemini-1.5-flash", "models/gemini-2.0-flash"]
+        with st.spinner("⚡ AI sedang menganalisis penawaran vendor & harga pasar..."):
+            try:
+                active_models = [
+                    m.name for m in genai.list_models()
+                    if "generateContent" in m.supported_generation_methods
+                ]
+                
+                candidate_models = []
+                for target in ["flash", "pro"]:
+                    candidate_models.extend([m for m in active_models if target in m])
+                candidate_models.extend([m for m in active_models if m not in candidate_models])
 
-                    # 3. Coba kirim prompt ke model yang terdaftar
-                    for m_name in candidate_models:
-                        try:
-                            model = genai.GenerativeModel(m_name)
-                            res = model.generate_content(prompt)
-                            if res and res.text:
-                                answer = res.text
-                                break
-                        except Exception as ex:
-                            last_err = str(ex)
-                            continue
+                if not candidate_models:
+                    candidate_models = ["models/gemini-1.5-flash", "models/gemini-2.0-flash"]
 
-                except Exception as e:
-                    last_err = str(e)
+                answer = None
+                for m_name in candidate_models:
+                    try:
+                        model = genai.GenerativeModel(m_name)
+                        res = model.generate_content(prompt)
+                        if res and res.text:
+                            answer = res.text
+                            break
+                    except Exception:
+                        continue
 
-            if answer:
-                st.markdown(answer)
-                st.session_state[chat_key].append({"role": "assistant", "content": answer})
-            else:
-                if "429" in str(last_err) or "quota" in str(last_err).lower():
-                    st.warning("⏳ Kuota API Gemini kamu sedang cooldown. Silakan coba klik tombol kirim lagi dalam 10-20 detik.")
+                if answer:
+                    st.session_state[insight_key] = answer
                 else:
-                    st.error(f"Gagal memproses AI: {last_err}")
+                    st.warning("⏳ Kuota API sedang cooldown. Silakan klik tombol 'Analisis Ulang AI' dalam beberapa detik.")
+                    return
+            except Exception as e:
+                st.error(f"Gagal memproses AI: {e}")
+                return
+
+    # TAMPILKAN HASILNYA SECARA OTOMATIS
+    if insight_key in st.session_state:
+        with st.container(border=True):
+            st.markdown(st.session_state[insight_key])
 
 
 
