@@ -397,7 +397,7 @@ def send_rfq_email(vendor_email, vendor_name, pr_code, deadline_str, items_text,
 
 
 # =====================================================================
-# AI ASSISTANT (Gemini Fix)
+# AI ASSISTANT (Auto-Detect Model Fix)
 # =====================================================================
 def render_ai_chat(df_display, rfq_title):
     if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
@@ -437,29 +437,43 @@ Pertanyaan PIC: {question}
 
 Jawab singkat, jelas, dan actionable dalam Bahasa Indonesia."""
 
-        # Daftar model yang dicoba secara berurutan
-        candidate_models = [
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
-            "gemini-2.0-flash-exp",
-            "gemini-1.5-pro",
-        ]
-
         answer = None
         last_err = None
 
         with st.chat_message("assistant"):
             with st.spinner("Mikir..."):
-                for m_name in candidate_models:
-                    try:
-                        model = genai.GenerativeModel(m_name)
-                        res = model.generate_content(prompt)
-                        if res and res.text:
-                            answer = res.text
-                            break
-                    except Exception as e:
-                        last_err = str(e)
-                        continue
+                try:
+                    # 1. Ambil daftar model aktual dari API Google yang support generateContent
+                    active_models = [
+                        m.name for m in genai.list_models()
+                        if "generateContent" in m.supported_generation_methods
+                    ]
+
+                    # 2. Prioritaskan model flash/pro yang terdeteksi
+                    candidate_models = []
+                    # Masukkan model hasil deteksi resmi lebih dulu
+                    for target in ["flash", "pro"]:
+                        candidate_models.extend([m for m in active_models if target in m])
+                    # Tambahkan sisa model aktif lainnya sebagai cadangan
+                    candidate_models.extend([m for m in active_models if m not in candidate_models])
+
+                    if not candidate_models:
+                        candidate_models = ["models/gemini-1.5-flash", "models/gemini-2.0-flash"]
+
+                    # 3. Coba kirim prompt ke model yang terdaftar
+                    for m_name in candidate_models:
+                        try:
+                            model = genai.GenerativeModel(m_name)
+                            res = model.generate_content(prompt)
+                            if res and res.text:
+                                answer = res.text
+                                break
+                        except Exception as ex:
+                            last_err = str(ex)
+                            continue
+
+                except Exception as e:
+                    last_err = str(e)
 
             if answer:
                 st.markdown(answer)
