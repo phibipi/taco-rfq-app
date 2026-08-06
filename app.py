@@ -508,9 +508,6 @@ def show_login():
                     st.error("Email atau Password salah.")
 
 
-# =====================================================================
-# UI: PROC (PIC procurement — kerja harian RFQ)
-# =====================================================================
 def render_pr_list(df_source, already_published):
     """Render list PR + checkbox item, dipakai buat tab Urgent & Normal."""
     if df_source.empty:
@@ -525,10 +522,14 @@ def render_pr_list(df_source, already_published):
 
         with st.expander(label, expanded=st.session_state.get("expand_all", False)):
             cA, cB, _ = st.columns([1, 1, 3])
+            
+            # Tombol Pilih Semua
             if cA.button("✅ Pilih Semua", key=f"all_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state["selected_items_dict"][k] = True
                 st.rerun()
+                
+            # Tombol Hapus Semua
             if cB.button("🗑️ Hapus Semua", key=f"none_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state["selected_items_dict"][k] = False
@@ -550,12 +551,22 @@ def render_pr_list(df_source, already_published):
                 c1, c2, c3, c4, c5 = st.columns([0.5, 3, 3, 1, 1])
                 with st.container():
                     st.markdown(f'<div style="background-color:{bg}; padding:4px; border-radius:4px;">', unsafe_allow_html=True)
+                    
+                    # 1. Ambil nilai status tercentang dari session state
+                    is_checked = st.session_state["selected_items_dict"].get(row_key, False)
+                    
+                    # 2. FIX VISUAL BUG: Sertakan status {is_checked} di dalam key!
+                    # Ini memaksa Streamlit me-refresh centang secara visual saat "Pilih Semua" diklik.
                     checked = c1.checkbox(
-                        "sel", key=f"chk_{row_key}",
-                        value=st.session_state["selected_items_dict"].get(row_key, False),
+                        "sel", 
+                        key=f"chk_{row_key}_{is_checked}",
+                        value=is_checked,
                         label_visibility="collapsed",
                     )
+                    
+                    # 3. Update status baru ke session state
                     st.session_state["selected_items_dict"][row_key] = checked
+                    
                     c2.write(item_row.get("DESCRIPTION", ""))
                     c3.write(item_row.get("DESCRIPTION 2", ""))
                     c4.write(item_row.get("QUANTITY", ""))
