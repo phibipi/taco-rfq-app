@@ -347,10 +347,10 @@ def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, re
 
 
 # =====================================================================
-# EMAIL
+# EMAIL (UPDATED: JUDUL RFQ)
 # =====================================================================
-def send_rfq_email(vendor_email, vendor_name, pr_code, deadline_str, items_text,
-                    delivery_type, pic_notes, files):
+def send_rfq_email(vendor_email, vendor_name, rfq_title, deadline_str, items_text,
+                   delivery_type, pic_notes, files):
     if "email_config" not in st.secrets:
         st.error("Konfigurasi 'email_config' tidak ditemukan di st.secrets")
         return False
@@ -362,11 +362,16 @@ def send_rfq_email(vendor_email, vendor_name, pr_code, deadline_str, items_text,
         return False
 
     subject = f"Request for Quotation - TACO - {datetime.now().strftime('%d %b %Y')}"
+    
+    # FIX: "No. PR" diganti menjadi "Judul RFQ"
     body = (
         f"Dear {vendor_name},\n\n"
         f"Kami mengundang Anda untuk mengisi Request for Quotation (RFQ):\n\n"
-        f"No. PR: {pr_code}\nBatas Waktu: {deadline_str}\nMetode Pengiriman: {delivery_type}\n"
-        f"Catatan Tambahan PIC: {pic_notes if pic_notes else '-'}\n\nDaftar Item:\n{items_text}\n\n"
+        f"Judul RFQ: {rfq_title}\n"
+        f"Batas Waktu Pengisian: {deadline_str}\n"
+        f"Metode Pengiriman: {delivery_type}\n"
+        f"Catatan Tambahan PIC: {pic_notes if pic_notes else '-'}\n\n"
+        f"Daftar Item:\n{items_text}\n\n"
         f"Silakan login ke portal: https://taco-rfq.streamlit.app/\n\n"
         f"Salam,\nTACO Procurement Team"
     )
@@ -721,9 +726,14 @@ def proc_portal_import():
                                 for v_name in sel_v_names:
                                     v_email = df_v[df_v["vendor_name"] == v_name]["email"].iloc[0]
                                     send_rfq_email(
-                                        v_email, v_name, pr_code_main,
-                                        rfq_deadline_val.strftime("%d %b %Y"), items_text_email,
-                                        delivery_type_val, pic_notes_val, attached_files or [],
+                                        v_email, 
+                                        v_name, 
+                                        rfq_title_val,  # <- Kirim variabel Judul RFQ ke fungsi email
+                                        rfq_deadline_val.strftime("%d %b %Y"), 
+                                        items_text_email,
+                                        delivery_type_val, 
+                                        pic_notes_val, 
+                                        attached_files or []
                                     )
 
                             st.success("🎉 Berhasil! RFQ tersimpan dan email terkirim ke vendor.")
