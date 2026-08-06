@@ -560,446 +560,427 @@ def render_pr_list(df_source, already_published):
                     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def proc_portal(tabs=None):
-    if tabs is None:
-        tabs = st.tabs(["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History"])
+# =====================================================================
+# UI: PROC - IMPORT PR LIST
+# =====================================================================
+def proc_portal_import():
+    st.header("📥 Import & Publish Purchase Request")
     already_published = get_already_published_keys()
 
-    # TAB 1: UPLOAD & REVIEW
-    with tabs[0]:
-        st.header("Upload Purchase Request")
-        uploaded_file = st.file_uploader("Upload File Excel", type=["xlsx"])
-        
-        if uploaded_file is None:
-            st.session_state["selected_items_dict"] = {}
-        else:
-            try:
-                df_raw = pd.read_excel(uploaded_file, header=2)
+    uploaded_file = st.file_uploader("Upload File Excel", type=["xlsx"])
+    if uploaded_file is None:
+        st.session_state["selected_items_dict"] = {}
+    else:
+        try:
+            df_raw = pd.read_excel(uploaded_file, header=2)
+            df_raw.columns = [str(c).strip().upper() for c in df_raw.columns]
+            if "PR CODE" not in df_raw.columns and "DESCRIPTION" not in df_raw.columns:
+                uploaded_file.seek(0)
+                df_raw = pd.read_excel(uploaded_file, header=0)
                 df_raw.columns = [str(c).strip().upper() for c in df_raw.columns]
-                if "PR CODE" not in df_raw.columns and "DESCRIPTION" not in df_raw.columns:
-                    uploaded_file.seek(0)
-                    df_raw = pd.read_excel(uploaded_file, header=0)
-                    df_raw.columns = [str(c).strip().upper() for c in df_raw.columns]
-            except Exception as e:
-                st.error(f"Gagal membaca file Excel: {e}")
-                return
+        except Exception as e:
+            st.error(f"Gagal membaca file Excel: {e}")
+            return
 
-            df_raw = df_raw.reset_index(drop=True)
-            df_raw["ROW_KEY"] = df_raw.index.astype(str)
+        df_raw = df_raw.reset_index(drop=True)
+        df_raw["ROW_KEY"] = df_raw.index.astype(str)
 
-            if "selected_items_dict" not in st.session_state:
-                st.session_state["selected_items_dict"] = {}
-            if "expand_all" not in st.session_state:
-                st.session_state["expand_all"] = False
+        if "selected_items_dict" not in st.session_state:
+            st.session_state["selected_items_dict"] = {}
+        if "expand_all" not in st.session_state:
+            st.session_state["expand_all"] = False
 
-            df_display = df_raw.copy()
-            if "STATUS" in df_raw.columns:
-                df_display = df_display[df_display["STATUS"].astype(str).str.strip().str.upper() == "OPEN"]
-            if "QUANTITY" in df_raw.columns:
-                df_raw["QUANTITY"] = pd.to_numeric(df_raw["QUANTITY"], errors="coerce").fillna(0)
-                df_display = df_display[pd.to_numeric(df_display["QUANTITY"], errors="coerce") > 0]
+        df_display = df_raw.copy()
+        if "STATUS" in df_raw.columns:
+            df_display = df_display[df_display["STATUS"].astype(str).str.strip().str.upper() == "OPEN"]
+        if "QUANTITY" in df_raw.columns:
+            df_raw["QUANTITY"] = pd.to_numeric(df_raw["QUANTITY"], errors="coerce").fillna(0)
+            df_display = df_display[pd.to_numeric(df_display["QUANTITY"], errors="coerce") > 0]
 
-            if df_display.empty:
-                st.warning("Tidak ada item berstatus 'Open' dengan Qty > 0 di file ini.")
+        if df_display.empty:
+            st.warning("Tidak ada item berstatus 'Open' dengan Qty > 0 di file ini.")
+        else:
+            search_query = st.text_input("🔍 Cari No. PR atau Nama Item...")
+            df_to_show = df_display.copy()
+            if search_query:
+                q = search_query.lower()
+                mask = (
+                    df_to_show.get("PR CODE", pd.Series()).astype(str).str.lower().str.contains(q, na=False)
+                    | df_to_show.get("DESCRIPTION", pd.Series()).astype(str).str.lower().str.contains(q, na=False)
+                )
+                df_to_show = df_to_show[mask]
+
+            col_exp, _ = st.columns([1, 4])
+            if col_exp.button("📂 Collapse All" if st.session_state["expand_all"] else "📂 Expand All", use_container_width=True):
+                st.session_state["expand_all"] = not st.session_state["expand_all"]
+                st.rerun()
+
+            sub_tab_urgent, sub_tab_normal = st.tabs(["🚨 Urgent Items", "📦 Normal Items"])
+
+            if "PRIORITY STATUS" in df_to_show.columns:
+                df_urgent = df_to_show[df_to_show["PRIORITY STATUS"].astype(str).str.upper().str.contains("URGENT", na=False)]
+                df_normal = df_to_show[~df_to_show["PRIORITY STATUS"].astype(str).str.upper().str.contains("URGENT", na=False)]
             else:
-                search_query = st.text_input("🔍 Cari No. PR atau Nama Item...")
-                df_to_show = df_display.copy()
-                if search_query:
-                    q = search_query.lower()
-                    mask = (
-                        df_to_show.get("PR CODE", pd.Series()).astype(str).str.lower().str.contains(q, na=False)
-                        | df_to_show.get("DESCRIPTION", pd.Series()).astype(str).str.lower().str.contains(q, na=False)
-                    )
-                    df_to_show = df_to_show[mask]
+                df_urgent = pd.DataFrame()
+                df_normal = df_to_show.copy()
 
-                col_exp, _ = st.columns([1, 4])
-                if col_exp.button("📂 Collapse All" if st.session_state["expand_all"] else "📂 Expand All", use_container_width=True):
-                    st.session_state["expand_all"] = not st.session_state["expand_all"]
-                    st.rerun()
+            with sub_tab_urgent:
+                with st.container(height=400, border=True):
+                    render_pr_list(df_urgent, already_published)
 
-                sub_tab_urgent, sub_tab_normal = st.tabs(["🚨 Urgent Items", "📦 Normal Items"])
+            with sub_tab_normal:
+                with st.container(height=400, border=True):
+                    render_pr_list(df_normal, already_published)
 
-                if "PRIORITY STATUS" in df_to_show.columns:
-                    df_urgent = df_to_show[df_to_show["PRIORITY STATUS"].astype(str).str.upper().str.contains("URGENT", na=False)]
-                    df_normal = df_to_show[~df_to_show["PRIORITY STATUS"].astype(str).str.upper().str.contains("URGENT", na=False)]
+            st.divider()
+            st.subheader("🎯 Review & Assign Vendor")
+            selected_keys = [k for k, v in st.session_state["selected_items_dict"].items() if v]
+            final_items = df_display[df_display["ROW_KEY"].isin(selected_keys)].copy()
+
+            if final_items.empty:
+                st.info("Belum ada item yang dipilih.")
+            else:
+                c_title, c_reset = st.columns([4, 1])
+                with c_title:
+                    rfq_title_val = st.text_input("🏷️ Judul RFQ (Wajib)", placeholder="Contoh: Pengadaan Sparepart Staples Batam").strip()
+                with c_reset:
+                    st.write(" ")
+                    st.write(" ")
+                    if st.button("🔄 Reset Pilihan", use_container_width=True):
+                        st.session_state["selected_items_dict"] = {}
+                        st.rerun()
+
+                for col in ["PR CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]:
+                    if col not in final_items.columns:
+                        final_items[col] = "-"
+
+                review_df = final_items[["PR CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]].copy()
+                review_df.columns = ["PR_CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION_2", "QUANTITY", "UOM"]
+                review_df["CATATAN_BARIS_ATAU_LINK_GAMBAR"] = "-"
+
+                edited = st.data_editor(review_df, hide_index=True, use_container_width=True,
+                                         disabled=["PR_CODE", "LOCATION", "UOM"], key="admin_editor")
+
+                attached_files = st.file_uploader(
+                    "📁 Lampirkan file gambar/PDF referensi", accept_multiple_files=True,
+                    type=["png", "jpg", "jpeg", "pdf"],
+                )
+
+                df_v = get_vendors()
+                if df_v.empty:
+                    st.warning("Belum ada vendor terdaftar.")
                 else:
-                    df_urgent = pd.DataFrame()
-                    df_normal = df_to_show.copy()
+                    sel_v_names = st.multiselect("Pilih Vendor Penerima RFQ:", df_v["vendor_name"].unique())
 
-                with sub_tab_urgent:
-                    with st.container(height=400, border=True):
-                        render_pr_list(df_urgent, already_published)
+                    c_left, c_right = st.columns(2)
+                    with c_left:
+                        rfq_deadline_val = st.date_input("📅 Batas Waktu Vendor:", value=datetime.today())
+                        delivery_type_val = st.radio("🚚 Metode Pengiriman:", ["Franco (Kirim ke lokasi)", "Loco (Pengambilan sendiri)"])
+                    with c_right:
+                        pic_notes_val = st.text_area("📝 Catatan Tambahan Khusus Vendor:")
 
-                with sub_tab_normal:
-                    with st.container(height=400, border=True):
-                        render_pr_list(df_normal, already_published)
+                    if st.button("🚀 Publish Undangan RFQ", type="primary", use_container_width=True):
+                        if not rfq_title_val:
+                            st.error("❌ Mohon isi 'Judul RFQ' terlebih dahulu!")
+                        elif not sel_v_names:
+                            st.error("❌ Silakan pilih minimal satu vendor.")
+                        else:
+                            vendor_ids = df_v[df_v["vendor_name"].isin(sel_v_names)]["id"].tolist()
+                            pr_code_main = str(edited["PR_CODE"].iloc[0])
+                            location_main = str(edited["LOCATION"].iloc[0])
+                            priority_main = "-"
+                            if "PRIORITY STATUS" in final_items.columns and not final_items["PRIORITY STATUS"].empty:
+                                priority_main = str(final_items["PRIORITY STATUS"].iloc[0])
 
-                st.divider()
-                st.subheader("🎯 Review & Assign Vendor")
-                selected_keys = [k for k, v in st.session_state["selected_items_dict"].items() if v]
-                final_items = df_display[df_display["ROW_KEY"].isin(selected_keys)].copy()
+                            pr_id = publish_rfq(
+                                rfq_title_val, pr_code_main, location_main, priority_main,
+                                st.session_state["user_info"]["id"], edited, vendor_ids,
+                                delivery_type_val, pic_notes_val, rfq_deadline_val, attached_files or [],
+                            )
 
-                if final_items.empty:
-                    st.info("Belum ada item yang dipilih.")
-                else:
-                    # FIX 1: Input Judul RFQ & Tombol Reset
-                    c_title, c_reset = st.columns([4, 1])
-                    with c_title:
-                        rfq_title_val = st.text_input("🏷️ Judul RFQ (Wajib)", placeholder="Contoh: Pengadaan Sparepart Staples Batam").strip()
-                    with c_reset:
-                        st.write(" ")
-                        st.write(" ")
-                        if st.button("🔄 Reset Pilihan", use_container_width=True):
+                            items_text_email = "\n".join(
+                                f"- {r['DESCRIPTION']} {r['DESCRIPTION_2']} ({r['QUANTITY']} {r['UOM']}) [Note: {r['CATATAN_BARIS_ATAU_LINK_GAMBAR']}]"
+                                for _, r in edited.iterrows()
+                            )
+
+                            with st.spinner("Mengirim notifikasi email ke vendor..."):
+                                for v_name in sel_v_names:
+                                    v_email = df_v[df_v["vendor_name"] == v_name]["email"].iloc[0]
+                                    send_rfq_email(
+                                        v_email, v_name, pr_code_main,
+                                        rfq_deadline_val.strftime("%d %b %Y"), items_text_email,
+                                        delivery_type_val, pic_notes_val, attached_files or [],
+                                    )
+
+                            st.success("🎉 Berhasil! RFQ tersimpan dan email terkirim ke vendor.")
                             st.session_state["selected_items_dict"] = {}
                             st.rerun()
 
-                    for col in ["PR CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]:
-                        if col not in final_items.columns:
-                            final_items[col] = "-"
 
-                    review_df = final_items[["PR CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]].copy()
-                    review_df.columns = ["PR_CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION_2", "QUANTITY", "UOM"]
-                    review_df["CATATAN_BARIS_ATAU_LINK_GAMBAR"] = "-"
+# =====================================================================
+# UI: PROC - MONITORING & COMPARISON (DENGAN DETAIL PAGE)
+# =====================================================================
+def proc_portal_comparison():
+    res_pr = sb.table("purchase_requests").select("id, pr_code, location, priority_status, rfq_title").execute()
+    df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
 
-                    edited = st.data_editor(review_df, hide_index=True, use_container_width=True,
-                                             disabled=["PR_CODE", "LOCATION", "UOM"], key="admin_editor")
+    active_id = st.session_state.get("active_compare_pr_id")
 
-                    attached_files = st.file_uploader(
-                        "📁 Lampirkan file gambar/PDF referensi", accept_multiple_files=True,
-                        type=["png", "jpg", "jpeg", "pdf"],
-                    )
+    # TAMPILAN HALAMAN DETAIL (Jika salah satu RFQ diklik)
+    if active_id and not df_pr.empty and active_id in df_pr["id"].values:
+        pr_info = df_pr[df_pr["id"] == active_id].iloc[0]
+        rfq_title_active = pr_info.get("rfq_title") or pr_info["pr_code"]
+        loc_active = pr_info.get("location") or "-"
 
-                    df_v = get_vendors()
-                    if df_v.empty:
-                        st.warning("Belum ada vendor terdaftar. Daftarkan dulu di tab 'Register Vendor'.")
+        # Tombol Kembali di Pojok Atas
+        if st.button("⬅️ Kembali ke Daftar RFQ"):
+            st.session_state["active_compare_pr_id"] = None
+            st.rerun()
+
+        st.title(f"📊 {rfq_title_active}")
+        st.caption(f"📍 Lokasi Pengiriman: **{loc_active}** | No. PR: **{pr_info['pr_code']}**")
+
+        # Control Action: Mark as Submitted / Relive
+        st.divider()
+        c_sub, c_relive, _ = st.columns([2, 2, 3])
+        with c_sub:
+            if st.button("🔒 Mark as Submitted (Selesai)", use_container_width=True):
+                sb.table("rfq_assignments").update({"status": "Submitted"}).execute()
+                st.success("RFQ berhasil ditandai sebagai 'Submitted'!")
+                st.rerun()
+        with c_relive:
+            if st.button("🔓 Relive / Re-open RFQ", use_container_width=True):
+                sb.table("rfq_assignments").update({"status": "Open"}).execute()
+                st.success("RFQ berhasil dibuka kembali!")
+                st.rerun()
+
+        st.markdown("---")
+        st.subheader("📋 Matrix Perbandingan Penawaran Vendor")
+
+        # Query all quotes for this active PR
+        raw_q = sb.table("quotes").select("*, rfq_assignments(*, pr_items(*), profiles(*))").execute()
+        data_matrix = []
+        vendors_in_pr = set()
+
+        for q in raw_q.data or []:
+            ass = q.get("rfq_assignments") or {}
+            item = ass.get("pr_items") or {}
+            if item.get("pr_id") == active_id:
+                v_name = (ass.get("profiles") or {}).get("vendor_name", "Unknown")
+                vendors_in_pr.add(v_name)
+                data_matrix.append({
+                    "description": item.get("description"),
+                    "spec": item.get("description2"),
+                    "qty": item.get("quantity", 0),
+                    "uom": item.get("uom"),
+                    "vendor": v_name,
+                    "price": q.get("unit_price", 0),
+                    "total": q.get("unit_price", 0) * item.get("quantity", 0)
+                })
+
+        if not data_matrix:
+            st.warning("Belum ada penawaran harga yang masuk dari vendor untuk RFQ ini.")
+        else:
+            df_m = pd.DataFrame(data_matrix)
+            pivot_items = df_m[["description", "spec", "qty", "uom"]].drop_duplicates().reset_index(drop=True)
+
+            for v in sorted(list(vendors_in_pr)):
+                prices = []
+                totals = []
+                for _, r in pivot_items.iterrows():
+                    match = df_m[(df_m["description"] == r["description"]) & (df_m["spec"] == r["spec"]) & (df_m["vendor"] == v)]
+                    if not match.empty:
+                        p = match["price"].values[0]
+                        t = match["total"].values[0]
+                        prices.append(f"Rp {p:,.0f}".replace(",", "."))
+                        totals.append(f"Rp {t:,.0f}".replace(",", "."))
                     else:
-                        sel_v_names = st.multiselect("Pilih Vendor Penerima RFQ:", df_v["vendor_name"].unique())
+                        prices.append("Rp 0")
+                        totals.append("Rp 0")
 
-                        c_left, c_right = st.columns(2)
-                        with c_left:
-                            rfq_deadline_val = st.date_input("📅 Batas Waktu Vendor:", value=datetime.today())
-                            delivery_type_val = st.radio("🚚 Metode Pengiriman:", ["Franco (Kirim ke lokasi)", "Loco (Pengambilan sendiri)"])
-                        with c_right:
-                            pic_notes_val = st.text_area("📝 Catatan Tambahan Khusus Vendor:")
+                pivot_items[f"{v} - Price/Unit"] = prices
+                pivot_items[f"{v} - Total Price"] = totals
 
-                        if st.button("🚀 Publish Undangan RFQ", type="primary", use_container_width=True):
-                            if not rfq_title_val:
-                                st.error("❌ Mohon isi 'Judul RFQ' terlebih dahulu!")
-                            elif not sel_v_names:
-                                st.error("❌ Silakan pilih minimal satu vendor.")
-                            else:
-                                vendor_ids = df_v[df_v["vendor_name"].isin(sel_v_names)]["id"].tolist()
-                                pr_code_main = str(edited["PR_CODE"].iloc[0])
-                                location_main = str(edited["LOCATION"].iloc[0])
-                                priority_main = "-"
-                                if "PRIORITY STATUS" in final_items.columns and not final_items["PRIORITY STATUS"].empty:
-                                    priority_main = str(final_items["PRIORITY STATUS"].iloc[0])
+            # Matrix Table Bersanding
+            st.dataframe(pivot_items, hide_index=True, use_container_width=True)
 
-                                pr_id = publish_rfq(
-                                    rfq_title_val, pr_code_main, location_main, priority_main,
-                                    st.session_state["user_info"]["id"], edited, vendor_ids,
-                                    delivery_type_val, pic_notes_val, rfq_deadline_val, attached_files or [],
-                                )
+            # Export Excel
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                pivot_items.to_excel(writer, index=False, sheet_name="CQR Matrix")
+            st.download_button(
+                "📥 Download CQR Comparison Matrix (Excel)",
+                output.getvalue(),
+                f"CQR_{rfq_title_active}.xlsx",
+                use_container_width=True,
+            )
 
-                                items_text_email = "\n".join(
-                                    f"- {r['DESCRIPTION']} {r['DESCRIPTION_2']} ({r['QUANTITY']} {r['UOM']}) [Note: {r['CATATAN_BARIS_ATAU_LINK_GAMBAR']}]"
-                                    for _, r in edited.iterrows()
-                                )
+            st.divider()
+            # AI Executive Insight Otomatis
+            render_ai_insight(pivot_items, rfq_title_active)
 
-                                with st.spinner("Mengirim notifikasi email ke vendor..."):
-                                    for v_name in sel_v_names:
-                                        v_email = df_v[df_v["vendor_name"] == v_name]["email"].iloc[0]
-                                        send_rfq_email(
-                                            v_email, v_name, pr_code_main,
-                                            rfq_deadline_val.strftime("%d %b %Y"), items_text_email,
-                                            delivery_type_val, pic_notes_val, attached_files or [],
-                                        )
-
-                                st.success("🎉 Berhasil! RFQ tersimpan dan email terkirim ke vendor.")
-                                st.session_state["selected_items_dict"] = {}
-                                st.rerun()
-
-    # TAB 2: MONITORING & COMPARISON (PDF STYLE MATRIX)
-    with tabs[1]:
-        st.header("Price Comparison & Rekomendasi Vendor")
-        
-        # Ambil data PR/RFQ
-        res_pr = sb.table("purchase_requests").select("id, pr_code, location, priority_status, rfq_title").execute()
-        df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
+    # TAMPILAN HALAMAN UTAMA (LIST DAFTAR RFQ)
+    else:
+        st.header("📊 Monitoring & Price Comparison")
 
         if df_pr.empty:
             st.info("Belum ada data RFQ yang dipublish.")
         else:
-            # FIX 2 & 3: Tampilkan list Judul RFQ - Lokasi - Urgent/Normal
+            st.write("Pilih salah satu RFQ di bawah untuk membuka **Halaman Detail Perbandingan**:")
+            st.markdown("---")
+
+            quotes_res = sb.table("quotes").select("assignment_id").execute()
+            submitted_ass_ids = set([q["assignment_id"] for q in quotes_res.data]) if quotes_res.data else set()
+
             for _, pr_row in df_pr.iterrows():
                 pr_id = pr_row["id"]
                 title = pr_row.get("rfq_title") or f"PR: {pr_row['pr_code']}"
                 loc = pr_row.get("location") or "-"
                 prio = str(pr_row.get("priority_status") or "")
                 tag_prio = "🚨 URGENT" if "URGENT" in prio.upper() else "📦 NORMAL"
-                
-                expander_title = f"📋 {title} | 📍 Lokasi: {loc} | {tag_prio}"
 
-                with st.expander(expander_title, expanded=False):
-                    # Ambil assignments & status submit vendor
-                    res_ass = sb.table("rfq_assignments").select("*, profiles(vendor_name), pr_items(*)").eq("pr_items.pr_id", pr_id).execute()
-                    
-                    # Preview barang
-                    items_res = sb.table("pr_items").select("*").eq("pr_id", pr_id).execute()
-                    df_items = pd.DataFrame(items_res.data) if items_res.data else pd.DataFrame()
+                with st.container(border=True):
+                    c_info, c_btn = st.columns([4, 1])
 
-                    st.markdown("**📦 Preview Barang:**")
-                    if not df_items.empty:
-                        st.dataframe(df_items[["description", "description2", "quantity", "uom"]].rename(columns={
-                            "description": "Deskripsi", "description2": "Spesifikasi", "quantity": "Qty", "uom": "UOM"
-                        }), hide_index=True, use_container_width=True)
+                    with c_info:
+                        st.subheader(f"📋 {title}")
+                        st.caption(f"📍 **Lokasi:** {loc} | **Priority:** {tag_prio} | **PR Code:** {pr_row['pr_code']}")
 
-                    # List Vendor Status Checklist
-                    st.markdown("**👥 Status Pengiriman Vendor:**")
-                    quotes_res = sb.table("quotes").select("assignment_id").execute()
-                    submitted_ass_ids = set([q["assignment_id"] for q in quotes_res.data]) if quotes_res.data else set()
+                        # Tracking singkat vendor
+                        res_ass = sb.table("rfq_assignments").select("*, profiles(vendor_name)").eq("pr_items.pr_id", pr_id).execute()
+                        if res_ass.data:
+                            v_names = []
+                            for ass in res_ass.data:
+                                vn = (ass.get("profiles") or {}).get("vendor_name", "Vendor")
+                                is_sub = ass["id"] in submitted_ass_ids
+                                icon = "✅" if is_sub else "⏳"
+                                v_names.append(f"{vn} {icon}")
+                            st.write("**Status Vendor:** " + " | ".join(v_names))
 
-                    # Mapping status vendor
-                    vendor_status = {}
-                    if res_ass.data:
-                        for ass in res_ass.data:
-                            v_name = (ass.get("profiles") or {}).get("vendor_name", "Vendor")
-                            is_sub = ass["id"] in submitted_ass_ids
-                            vendor_status[v_name] = is_sub
-
-                    col_v_list, col_btn = st.columns([3, 1])
-                    with col_v_list:
-                        for v_name, is_done in vendor_status.items():
-                            check_icon = "✅ (Sudah Submit)" if is_done else "⏳ (Belum Submit)"
-                            st.write(f"- **{v_name}**: {check_icon}")
-
-                    with col_btn:
-                        # FIX 3: Tombol Compare Quotation
-                        if st.button("📊 Compare Quotation", key=f"comp_{pr_id}"):
+                    with c_btn:
+                        st.write(" ")
+                        # KLIK KE HALAMAN DETAIL BARU
+                        if st.button("🔍 Buka Detail", key=f"open_detail_{pr_id}", type="primary", use_container_width=True):
                             st.session_state["active_compare_pr_id"] = pr_id
                             st.rerun()
 
-            st.divider()
 
-            # Render Matrix Comparison PDF style jika PR dipilih
-            active_id = st.session_state.get("active_compare_pr_id")
-            if active_id:
-                pr_info = df_pr[df_pr["id"] == active_id].iloc[0]
-                rfq_title_active = pr_info.get("rfq_title") or pr_info["pr_code"]
-                st.subheader(f"📊 Matrix Perbandingan: {rfq_title_active}")
-
-                # Tombol Mark as Submitted / Relive
-                c_sub, c_relive = st.columns(2)
-                with c_sub:
-                    if st.button("🔒 Mark as Submitted (Arsip ke History)"):
-                        sb.table("rfq_assignments").update({"status": "Submitted"}).execute()
-                        st.success("RFQ berhasil ditandai sebagai 'Submitted' dan dipindahkan ke History!")
-                        st.rerun()
-                with c_relive:
-                    if st.button("🔓 Relive / Re-open RFQ"):
-                        sb.table("rfq_assignments").update({"status": "Open"}).execute()
-                        st.success("RFQ berhasil dibuka kembali!")
-                        st.rerun()
-
-                # Build PDF Style Matrix
-                # Query all quotes for this PR
-                raw_q = sb.table("quotes").select("*, rfq_assignments(*, pr_items(*), profiles(*))").execute()
-                data_matrix = []
-                vendors_in_pr = set()
-
-                for q in raw_q.data or []:
-                    ass = q.get("rfq_assignments") or {}
-                    item = ass.get("pr_items") or {}
-                    if item.get("pr_id") == active_id:
-                        v_name = (ass.get("profiles") or {}).get("vendor_name", "Unknown")
-                        vendors_in_pr.add(v_name)
-                        data_matrix.append({
-                            "description": item.get("description"),
-                            "spec": item.get("description2"),
-                            "qty": item.get("quantity", 0),
-                            "uom": item.get("uom"),
-                            "vendor": v_name,
-                            "price": q.get("unit_price", 0),
-                            "total": q.get("unit_price", 0) * item.get("quantity", 0)
-                        })
-
-                if not data_matrix:
-                    st.warning("Belum ada penawaran harga yang masuk dari vendor untuk RFQ ini.")
-                else:
-                    df_m = pd.DataFrame(data_matrix)
-                    # Pivot Table bersanding ala PDF
-                    pivot_items = df_m[["description", "spec", "qty", "uom"]].drop_duplicates().reset_index(drop=True)
-                    
-                    # Tambahkan kolom Vendor bersanding (Price/Unit & Total Price)[cite: 1]
-                    for v in sorted(list(vendors_in_pr)):
-                        prices = []
-                        totals = []
-                        for _, r in pivot_items.iterrows():
-                            match = df_m[(df_m["description"] == r["description"]) & (df_m["spec"] == r["spec"]) & (df_m["vendor"] == v)]
-                            if not match.empty:
-                                p = match["price"].values[0]
-                                t = match["total"].values[0]
-                                prices.append(f"Rp {p:,.0f}".replace(",", "."))
-                                totals.append(f"Rp {t:,.0f}".replace(",", "."))
-                            else:
-                                prices.append("Rp 0")
-                                totals.append("Rp 0")
-                        
-                        pivot_items[f"{v} - Price/Unit"] = prices
-                        pivot_items[f"{v} - Total Price"] = totals
-
-                    # FIX 5: Tampilkan bentuk tabel bersanding persis seperti PDF
-                    st.dataframe(pivot_items, hide_index=True, use_container_width=True)
-
-                    # Export Excel persis Matrix
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                        pivot_items.to_excel(writer, index=False, sheet_name="CQR Matrix")
-                    st.download_button(
-                        "📥 Download CQR Comparison Matrix (Excel)",
-                        output.getvalue(),
-                        f"CQR_{rfq_title_active}.xlsx",
-                        use_container_width=True,
-                    )
-
-                    st.divider()
-                    st.markdown("##### 🤖 Tanya AI soal perbandingan ini")
-                    render_ai_insight(pivot_items, rfq_title_active)
-
-    # TAB 3: HISTORY
-    with tabs[2]:
-        st.header("🔍 History RFQ")
-        df_hist = get_history_data()
-        if df_hist.empty:
-            st.info("Belum ada riwayat publikasi.")
-        else:
-            st.dataframe(df_hist, hide_index=True, use_container_width=True)
+# =====================================================================
+# UI: PROC - HISTORY RFQ
+# =====================================================================
+def proc_portal_history():
+    st.header("🔍 History RFQ")
+    df_hist = get_history_data()
+    if df_hist.empty:
+        st.info("Belum ada riwayat publikasi.")
+    else:
+        st.dataframe(df_hist, hide_index=True, use_container_width=True)
 
 
 # =====================================================================
-# UI: ADMIN (khusus urus akun — TIDAK ikut kerjaan RFQ harian)
+# UI: ADMIN UTILS (REGISTRATION & ACCOUNT MANAGEMENT)
 # =====================================================================
-def admin_portal(tabs=None):
-    if tabs is None:
-        tabs = st.tabs(["➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User", "🔑 Reset Password"])
-
-    with tabs[0]:
-        st.header("Daftarkan PIC Procurement")
-        st.caption("PIC yang didaftarkan di sini akan punya akses ke Import PR, Publish RFQ, Comparison & History — TAPI tidak bisa daftarin user baru.")
-
-        sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
-        with sub1:
-            with st.form("form_register_pic", clear_on_submit=True):
-                p_name = st.text_input("Nama PIC").strip()
-                p_email = st.text_input("Email PIC").strip().lower()
-                submitted = st.form_submit_button("Simpan PIC Baru", type="primary")
-                if submitted:
-                    if not p_name or not p_email or "@" not in p_email:
-                        st.error("❌ Nama/Email tidak valid.")
-                    else:
-                        import random, string
-                        auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-                        ok, err = register_user(p_name, p_email, auto_password, "proc")
-                        if ok:
-                            st.success(f"🎉 PIC {p_name} berhasil didaftarkan.")
-                            st.info(f"🔑 Password: `{auto_password}` — catat & kirim manual ke PIC ybs, ini cuma muncul sekali.")
-                        else:
-                            st.error(f"❌ Gagal: {err}")
-
-        with sub2:
-            st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email** (1 baris = 1 PIC).")
-            bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_pic")
-            if bulk_file is not None:
-                df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
-                st.dataframe(df_bulk, use_container_width=True, hide_index=True)
-                if st.button("🚀 Daftarkan Semua PIC Ini", type="primary"):
-                    with st.spinner("Mendaftarkan..."):
-                        result_df = bulk_register_users(df_bulk, "proc")
-                    st.success("Selesai! Cek hasil & password di tabel bawah (SIMPAN sekarang, tidak muncul lagi).")
-                    st.dataframe(result_df, use_container_width=True, hide_index=True)
-                    csv = result_df.to_csv(index=False).encode("utf-8")
-                    st.download_button("📥 Download Hasil (CSV, berisi password)", csv, "hasil_daftar_pic.csv")
-
-    with tabs[1]:
-        st.header("Daftarkan Vendor")
-        sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
-        with sub1:
-            with st.form("form_register_vendor", clear_on_submit=True):
-                v_name = st.text_input("Nama Vendor").strip()
-                v_email = st.text_input("Email Vendor").strip().lower()
-                submitted = st.form_submit_button("Simpan Vendor Baru", type="primary")
-                if submitted:
-                    if not v_name or not v_email or "@" not in v_email:
-                        st.error("❌ Nama/Email tidak valid.")
-                    else:
-                        import random, string
-                        auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-                        ok, err = register_user(v_name, v_email, auto_password, "vendor")
-                        if ok:
-                            st.success(f"🎉 Vendor {v_name} berhasil didaftarkan.")
-                            st.info(f"🔑 Password: `{auto_password}` — catat & kirim manual ke vendor ybs, ini cuma muncul sekali.")
-                        else:
-                            st.error(f"❌ Gagal: {err}")
-
-        with sub2:
-            st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email** (1 baris = 1 vendor).")
-            bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_vendor")
-            if bulk_file is not None:
-                df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
-                st.dataframe(df_bulk, use_container_width=True, hide_index=True)
-                if st.button("🚀 Daftarkan Semua Vendor Ini", type="primary"):
-                    with st.spinner("Mendaftarkan..."):
-                        result_df = bulk_register_users(df_bulk, "vendor")
-                    st.success("Selesai! Cek hasil & password di tabel bawah (SIMPAN sekarang, tidak muncul lagi).")
-                    st.dataframe(result_df, use_container_width=True, hide_index=True)
-                    csv = result_df.to_csv(index=False).encode("utf-8")
-                    st.download_button("📥 Download Hasil (CSV, berisi password)", csv, "hasil_daftar_vendor.csv")
-
-    with tabs[2]:
-        st.header("👥 Daftar Semua User")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**PIC Procurement**")
-            st.dataframe(get_users_by_role("proc")[["email", "vendor_name", "created_at"]] if not get_users_by_role("proc").empty else pd.DataFrame(), hide_index=True, use_container_width=True)
-        with c2:
-            st.markdown("**Vendor**")
-            df_v = get_vendors()
-            st.dataframe(df_v[["email", "vendor_name", "created_at"]] if not df_v.empty else pd.DataFrame(), hide_index=True, use_container_width=True)
-
-    with tabs[3]:
-        st.header("🔑 Reset Password User")
-        st.caption("Reset password untuk PIC maupun Vendor yang lupa password atau butuh password baru.")
-
-        df_proc = get_users_by_role("proc")
-        df_vend = get_vendors()
-        df_all = pd.concat([df_proc, df_vend], ignore_index=True) if not df_proc.empty or not df_vend.empty else pd.DataFrame()
-
-        if df_all.empty:
-            st.info("Belum ada user terdaftar.")
-        else:
-            df_all["label"] = df_all["vendor_name"].fillna("-") + " (" + df_all["email"] + ") — " + df_all["role"]
-            sel_label = st.selectbox("Pilih User:", df_all["label"])
-            sel_row = df_all[df_all["label"] == sel_label].iloc[0]
-
-            mode = st.radio("Password baru:", ["Generate otomatis (random)", "Ketik manual"])
-            if mode == "Ketik manual":
-                new_pw = st.text_input("Password baru (min. 6 karakter):", type="password")
-            else:
-                new_pw = None
-
-            if st.button("🔄 Reset Password", type="primary"):
-                import random, string
-                final_pw = new_pw if mode == "Ketik manual" else "".join(random.choices(string.ascii_letters + string.digits, k=10))
-
-                if mode == "Ketik manual" and (not new_pw or len(new_pw) < 6):
-                    st.error("❌ Password minimal 6 karakter.")
+def admin_portal_register_pic():
+    st.header("➕ Daftarkan PIC Procurement")
+    sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
+    with sub1:
+        with st.form("form_register_pic", clear_on_submit=True):
+            p_name = st.text_input("Nama PIC").strip()
+            p_email = st.text_input("Email PIC").strip().lower()
+            submitted = st.form_submit_button("Simpan PIC Baru", type="primary")
+            if submitted:
+                if not p_name or not p_email or "@" not in p_email:
+                    st.error("❌ Nama/Email tidak valid.")
                 else:
-                    ok, err = reset_user_password(sel_row["id"], final_pw)
+                    auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                    ok, err = register_user(p_name, p_email, auto_password, "proc")
                     if ok:
-                        st.success(f"🎉 Password untuk **{sel_row['email']}** berhasil direset.")
-                        st.info(f"🔑 Password baru: `{final_pw}` — catat & kirim manual ke user ybs, ini cuma muncul sekali.")
+                        st.success(f"🎉 PIC {p_name} berhasil didaftarkan.")
+                        st.info(f"🔑 Password: `{auto_password}` — catat & kirim manual ke PIC ybs.")
                     else:
                         st.error(f"❌ Gagal: {err}")
+    with sub2:
+        st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email**.")
+        bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_pic")
+        if bulk_file is not None:
+            df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
+            st.dataframe(df_bulk, use_container_width=True, hide_index=True)
+            if st.button("🚀 Daftarkan Semua PIC Ini", type="primary"):
+                result_df = bulk_register_users(df_bulk, "proc")
+                st.success("Selesai! Cek hasil & password di bawah.")
+                st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+
+def admin_portal_register_vendor():
+    st.header("➕ Daftarkan Vendor")
+    sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
+    with sub1:
+        with st.form("form_register_vendor", clear_on_submit=True):
+            v_name = st.text_input("Nama Vendor").strip()
+            v_email = st.text_input("Email Vendor").strip().lower()
+            submitted = st.form_submit_button("Simpan Vendor Baru", type="primary")
+            if submitted:
+                if not v_name or not v_email or "@" not in v_email:
+                    st.error("❌ Nama/Email tidak valid.")
+                else:
+                    auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                    ok, err = register_user(v_name, v_email, auto_password, "vendor")
+                    if ok:
+                        st.success(f"🎉 Vendor {v_name} berhasil didaftarkan.")
+                        st.info(f"🔑 Password: `{auto_password}` — catat & kirim manual ke vendor ybs.")
+                    else:
+                        st.error(f"❌ Gagal: {err}")
+    with sub2:
+        st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email**.")
+        bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_vendor")
+        if bulk_file is not None:
+            df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
+            st.dataframe(df_bulk, use_container_width=True, hide_index=True)
+            if st.button("🚀 Daftarkan Semua Vendor Ini", type="primary"):
+                result_df = bulk_register_users(df_bulk, "vendor")
+                st.success("Selesai! Cek hasil & password di bawah.")
+                st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+
+def admin_portal_user_list():
+    st.header("👥 Daftar Semua User")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**PIC Procurement**")
+        st.dataframe(get_users_by_role("proc")[["email", "vendor_name", "created_at"]] if not get_users_by_role("proc").empty else pd.DataFrame(), hide_index=True, use_container_width=True)
+    with c2:
+        st.markdown("**Vendor**")
+        df_v = get_vendors()
+        st.dataframe(df_v[["email", "vendor_name", "created_at"]] if not df_v.empty else pd.DataFrame(), hide_index=True, use_container_width=True)
+
+
+def admin_portal_reset_password():
+    st.header("🔑 Reset Password User")
+    df_proc = get_users_by_role("proc")
+    df_vend = get_vendors()
+    df_all = pd.concat([df_proc, df_vend], ignore_index=True) if not df_proc.empty or not df_vend.empty else pd.DataFrame()
+
+    if df_all.empty:
+        st.info("Belum ada user terdaftar.")
+    else:
+        df_all["label"] = df_all["vendor_name"].fillna("-") + " (" + df_all["email"] + ") — " + df_all["role"]
+        sel_label = st.selectbox("Pilih User:", df_all["label"])
+        sel_row = df_all[df_all["label"] == sel_label].iloc[0]
+
+        mode = st.radio("Password baru:", ["Generate otomatis (random)", "Ketik manual"])
+        new_pw = st.text_input("Password baru (min. 6 karakter):", type="password") if mode == "Ketik manual" else None
+
+        if st.button("🔄 Reset Password", type="primary"):
+            final_pw = new_pw if mode == "Ketik manual" else "".join(random.choices(string.ascii_letters + string.digits, k=10))
+            if mode == "Ketik manual" and (not new_pw or len(new_pw) < 6):
+                st.error("❌ Password minimal 6 karakter.")
+            else:
+                ok, err = reset_user_password(sel_row["id"], final_pw)
+                if ok:
+                    st.success(f"🎉 Password untuk **{sel_row['email']}** berhasil direset.")
+                    st.info(f"🔑 Password baru: `{final_pw}`")
+                else:
+                    st.error(f"❌ Gagal: {err}")
 
 
 # =====================================================================
@@ -1103,19 +1084,54 @@ def vendor_portal(vendor_id):
                     st.rerun()
 
 
+# =====================================================================
+# COMBINED ADMIN PORTAL (SIDEBAR NAVIGATION)
+# =====================================================================
 def combined_admin_portal():
-    """Dipakai untuk role 'admin' yang JUGA merangkap kerjaan PIC (misal: Phoebe)."""
-    all_tabs = st.tabs([
-        "📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History",
-        "➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User", "🔑 Reset Password",
-    ])
-    proc_portal(tabs=all_tabs[0:3])
-    admin_portal(tabs=all_tabs[3:7])
+    # Inisialisasi state halaman aktif jika belum ada
+    if "current_page" not in st.session_state:
+        st.session_state["current_page"] = "📥 Import PR List"
+
+    # Sidebar Menu untuk Navigasi Utama
+    st.sidebar.markdown("### 📌 Menu Navigasi")
+    page_selection = st.sidebar.radio(
+        "Pilih Menu:",
+        [
+            "📥 Import PR List", 
+            "📊 Monitoring & Comparison", 
+            "🔍 History RFQ",
+            "➕ Daftarkan PIC", 
+            "➕ Daftarkan Vendor", 
+            "👥 Daftar User", 
+            "🔑 Reset Password"
+        ],
+        index=["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History RFQ", "➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User", "🔑 Reset Password"].index(st.session_state["current_page"]) if st.session_state["current_page"] in ["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History RFQ", "➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User", "🔑 Reset Password"] else 0
+    )
+
+    # Sinkronisasi pilihan sidebar ke session state
+    if page_selection != st.session_state.get("current_page_selected"):
+        st.session_state["current_page"] = page_selection
+        st.session_state["current_page_selected"] = page_selection
+
+    # Routing Halaman berdasarkan Pilihan
+    selected_page = st.session_state["current_page"]
+
+    if selected_page == "📥 Import PR List":
+        proc_portal_import()
+    elif selected_page == "📊 Monitoring & Comparison":
+        proc_portal_comparison()
+    elif selected_page == "🔍 History RFQ":
+        proc_portal_history()
+    elif selected_page == "➕ Daftarkan PIC":
+        admin_portal_register_pic()
+    elif selected_page == "➕ Daftarkan Vendor":
+        admin_portal_register_vendor()
+    elif selected_page == "👥 Daftar User":
+        admin_portal_user_list()
+    elif selected_page == "🔑 Reset Password":
+        admin_portal_reset_password()
 
 
-# =====================================================================
-# MAIN
-# =====================================================================
 def main():
     if "user_info" not in st.session_state:
         st.session_state["user_info"] = None
@@ -1127,20 +1143,20 @@ def main():
         return
 
     user = st.session_state["user_info"]
-    col_u, col_lo = st.columns([6, 1])
-    with col_u:
-        st.title(f"👋 Welcome, **{user.get('vendor_name') or user.get('email')}**")
-    with col_lo:
-        if st.button("Log Out"):
-            st.session_state["user_info"] = None
-            st.session_state["selected_items_dict"] = {}
-            st.rerun()
-    st.divider()
+    
+    # Header User & Logout di Sidebar
+    st.sidebar.title(f"👋 {user.get('vendor_name') or user.get('email')}")
+    st.sidebar.caption(f"Role: **{user.get('role', '').upper()}**")
+    if st.sidebar.button("🚪 Log Out", use_container_width=True):
+        st.session_state["user_info"] = None
+        st.session_state["selected_items_dict"] = {}
+        st.session_state["active_compare_pr_id"] = None
+        st.rerun()
 
     if user["role"] == "admin":
         combined_admin_portal()
     elif user["role"] == "proc":
-        proc_portal()
+        combined_admin_portal()  # Gunakan sidebar yang sama untuk PROC
     else:
         vendor_portal(user["id"])
 
