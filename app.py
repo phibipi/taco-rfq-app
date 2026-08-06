@@ -11,6 +11,7 @@ from email import encoders
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
+import re
 
 # =====================================================================
 # CONFIG
@@ -128,6 +129,20 @@ def get_or_create_pr(pr_code, location, priority, uploaded_by):
     ).execute()
     return new_pr.data[0]["id"]
 
+def clean_description(text):
+    """
+    Hanya menghapus kode angka bertitik di depan deskripsi.
+    Contoh: '610.01.98 - OTHER WAREHOUSE...' -> 'OTHER WAREHOUSE...'
+    """
+    if not text or pd.isna(text):
+        return "-"
+    
+    text_str = str(text).strip()
+    
+    # Menghapus pola angka bertitik di depan seperti '610.01.98 - ' atau '600.12 -'
+    cleaned_text = re.sub(r"^\d+[\.\d]*\s*-\s*", "", text_str)
+    
+    return cleaned_text.strip() or text_str
 
 def get_or_create_item(pr_id, description, description2, quantity, uom):
     q = (
@@ -320,7 +335,7 @@ def get_history_data():
 def get_vendor_assignments(vendor_id):
     res = (
         sb.table("rfq_assignments")
-        .select("*, pr_items(*, purchase_requests(*))")
+        .select("*, pr_items(*, purchase_requests(*, profiles!purchase_requests_uploaded_by_fkey(vendor_name, email)))")
         .eq("vendor_id", vendor_id)
         .eq("status", "Open")
         .execute()
@@ -1051,104 +1066,225 @@ def admin_portal_reset_password():
 
 
 # =====================================================================
-# UI: VENDOR (UPDATED)
+# UI: VENDOR PORTAL (NAMA PIC & FORMAT HARGA TITIK)
 # =====================================================================
 def vendor_portal(vendor_id):
-    st.header("📝 Form Penawaran Harga Vendor")
+    if "vendor_page" not in st.session_state:
+        st.session_state["vendor_page"] = "List RFQ Aktif"
 
-    # Term of Payment
-    with st.expander("⚙️ Data Vendor Saya (Term of Payment)"):
-        prof = sb.table("profiles").select("top_days").eq("id", vendor_id).single().execute()
-        current_top = (prof.data or {}).get("top_days") or 0
-        new_top = st.number_input("TOP / Term of Payment (hari)", min_value=0, value=int(current_top), step=1)
-        if st.button("Simpan TOP"):
-            update_vendor_top(vendor_id, new_top)
-            st.success("TOP berhasil disimpan.")
+    # Sidebar Navigation
+    st.sidebar.markdown("## 🧭 Navigasi Vendor")
+    st.sidebar.markdown("---")
+
+    v_menus = [
+        ("⚙️ Data Supplier", "v_supplier"),
+        ("📋 List RFQ Aktif", "v_rfq"),
+        ("🔍 History RFQ", "v_history"),
+    ]
+
+    for label, v_id in v_menus:
+        is_active = (st.session_state["vendor_page"] == label.split(" ", 1)[1])
+        btn_type = "primary" if is_active else "secondary"
+        if st.sidebar.button(label, key=f"btn_vmenu_{v_id}", type=btn_type, use_container_width=True):
+            st.session_state["vendor_page"] = label.split(" ", 1)[1]
+            st.session_state["active_vendor_rfq_id"] = None
             st.rerun()
 
-    assignments = get_vendor_assignments(vendor_id)
-    if not assignments:
-        st.info("Belum ada undangan RFQ untuk Anda.")
-        return
+    st.sidebar.markdown("---")
 
-    # Grouping berdasarkan Judul RFQ / PR
-    pr_groups = {}
-    for a in assignments:
-        item = a.get("pr_items") or {}
-        pr = item.get("purchase_requests") or {}
-        rfq_title = pr.get("rfq_title") or f"PR: {pr.get('pr_code', '-')}"
-        location = pr.get("location", "-")
-        prio = str(pr.get("priority_status", ""))
-        tag_prio = "🚨 URGENT" if "URGENT" in prio.upper() else "📦 NORMAL"
+    selected_v_page = st.session_state["vendor_page"]
 
-        pr_groups.setdefault(rfq_title, {"pr_id": pr.get("id"), "location": location, "prio": tag_prio, "rows": []})
-        pr_groups[rfq_title]["rows"].append(a)
+    # -----------------------------------------------------------------
+    # MENU 1: DATA SUPPLIER
+    # -----------------------------------------------------------------
+    if selected_v_page == "Data Supplier":
+        st.header("⚙️ Data Supplier & Profil Vendor")
+        prof = sb.table("profiles").select("*").eq("id", vendor_id).single().execute()
+        p_data = prof.data or {}
 
-    # FIX 3: Listout halaman depan (Judul RFQ, Lokasi, Tag Urgent/Normal, Preview Barang)
-    for title, group in pr_groups.items():
-        expander_label = f"📋 {title} | 📍 Lokasi: {group['location']} | {group['prio']}"
+        with st.container(border=True):
+            st.markdown(f"**Nama Perusahaan/Vendor:** {p_data.get('vendor_name', '-')}")
+            st.markdown(f"**Email Terdaftar:** {p_data.get('email', '-')}")
+            
+            st.divider()
+            current_top = p_data.get("top_days") or 0
+            new_top = st.number_input("TOP / Term of Payment Standard (Hari)", min_value=0, value=int(current_top), step=1)
+            if st.button("Simpan Data TOP", type="primary"):
+                update_vendor_top(vendor_id, new_top)
+                st.success("Term of Payment berhasil diperbarui!")
+                st.rerun()
+
+    # -----------------------------------------------------------------
+    # MENU 2: LIST RFQ AKTIF
+    # -----------------------------------------------------------------
+    elif selected_v_page == "List RFQ Aktif":
+        assignments = get_vendor_assignments(vendor_id)
         
-        with st.expander(expander_label, expanded=False):
-            rows = group["rows"]
+        if not assignments:
+            st.info("Belum ada undangan RFQ aktif untuk Anda saat ini.")
+            return
 
-            # File referensi jika ada
-            attachments = get_pr_attachments(group["pr_id"]) if group["pr_id"] else []
+        # Grouping RFQ + Ambil Nama PIC Pengirim
+        pr_groups = {}
+        for a in assignments:
+            item = a.get("pr_items") or {}
+            pr = item.get("purchase_requests") or {}
+            
+            # Ambil nama PIC pengirim dari relasi profiles
+            pic_profile = pr.get("profiles") or {}
+            pic_name = pic_profile.get("vendor_name") or pic_profile.get("email") or "Procurement Team"
+
+            rfq_title = pr.get("rfq_title") or f"PR: {pr.get('pr_code', '-')}"
+            
+            pr_groups.setdefault(pr.get("id"), {
+                "title": rfq_title,
+                "pr_code": pr.get("pr_code", "-"),
+                "location": pr.get("location", "-"),
+                "prio": str(pr.get("priority_status", "")),
+                "pic_name": pic_name,
+                "rows": []
+            })
+            pr_groups[pr.get("id")]["rows"].append(a)
+
+        active_rfq_id = st.session_state.get("active_vendor_rfq_id")
+
+        # TAMPILAN DETAIL PENAWARAN (Jika Tombol 'Buka Detail' Diklik)
+        if active_rfq_id and active_rfq_id in pr_groups:
+            group = pr_groups[active_rfq_id]
+            
+            if st.button("⬅️ Kembali ke Daftar RFQ Aktif"):
+                st.session_state["active_vendor_rfq_id"] = None
+                st.rerun()
+
+            st.title(f"📝 Penawaran Harga: {group['title']}")
+            # INFO PIC DITAMBAHKAN DISINI
+            st.caption(f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} | **No. PR:** {group['pr_code']}")
+            st.divider()
+
+            # Attachment File
+            attachments = get_pr_attachments(active_rfq_id)
             if attachments:
-                st.markdown("**📎 File referensi:** " + ", ".join(a["file_name"] for a in attachments))
+                st.markdown("**📎 File Referensi Lampiran:** " + ", ".join(f"`{a['file_name']}`" for a in attachments))
 
-            # Preview Items
+            # Data Preview Items
             table_rows = []
-            for a in rows:
+            for a in group["rows"]:
                 item = a.get("pr_items") or {}
+                raw_desc = item.get("description", "-")
+                clean_desc = clean_description(raw_desc)
+
                 table_rows.append({
                     "assignment_id": a["id"],
-                    "Deskripsi": item.get("description"),
-                    "Spesifikasi": item.get("description2"),
-                    "Qty": item.get("quantity"),
-                    "UOM": item.get("uom"),
+                    "Deskripsi": clean_desc,
+                    "Spesifikasi": item.get("description2", "-"),
+                    "Qty": item.get("quantity", 0),
+                    "UOM": item.get("uom", "-"),
                     "Unit_Price": 0,
                     "Brand": "-",
                     "Ready_Stock": "Ya",
                     "Lead_Time_Days": 7,
                 })
-            
+
             df_preview = pd.DataFrame(table_rows)
 
-            # Tombol "Isi Penawaran Harga"
-            if st.button(f"✏️ Isi Penawaran Harga: {title}", key=f"btn_fill_{group['pr_id']}"):
-                st.session_state[f"fill_active_{group['pr_id']}"] = True
+            st.markdown("##### ✏️ Masukkan Harga & Detail Penawaran:")
+            
+            # FORMAT HARGA XXX.XXX BER-TITIK DI DATA EDITOR
+            edited = st.data_editor(
+                df_preview.drop(columns=["assignment_id"]),
+                key=f"editor_v_{active_rfq_id}",
+                hide_index=True,
+                use_container_width=True,
+                disabled=["Deskripsi", "Spesifikasi", "Qty", "UOM"],
+                column_config={
+                    "Unit_Price": st.column_config.NumberColumn(
+                        "Unit Price (IDR)",
+                        format="Rp %,d",  # Titik ribuan otomatis (Rp 1.000.000)
+                        min_value=0,
+                        step=1000,
+                    ),
+                    "Ready_Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=True),
+                    "Lead_Time_Days": st.column_config.NumberColumn("Lead Time (Hari)", min_value=1, step=1),
+                },
+            )
 
-            # Form pengisian dibuka setelah tombol diklik
-            if st.session_state.get(f"fill_active_{group['pr_id']}", False):
-                st.markdown("---")
-                st.markdown("##### 📝 Masukkan Harga & Detail Penawaran:")
+            if st.button("🚀 Kirim Penawaran Now", type="primary", use_container_width=True):
+                for idx, r in edited.iterrows():
+                    ass_id = df_preview.iloc[idx]["assignment_id"]
+                    submit_quote(
+                        ass_id, 
+                        vendor_id, 
+                        r["Unit_Price"], 
+                        r["Brand"], 
+                        r["Lead_Time_Days"], 
+                        r["Ready_Stock"]
+                    )
+                st.success(f"🎉 Penawaran untuk '{group['title']}' berhasil terkirim ke PIC {group['pic_name']}!")
+                st.session_state["active_vendor_rfq_id"] = None
+                st.rerun()
 
-                # FIX 2: Hilangkan assignment_id dari editor visual
-                # FIX 4: Column config untuk format Rupiah Rp X.XXX.XXX
-                edited = st.data_editor(
-                    df_preview.drop(columns=["assignment_id"]), 
-                    key=f"edit_{group['pr_id']}", 
-                    hide_index=True, 
-                    use_container_width=True,
-                    disabled=["Deskripsi", "Spesifikasi", "Qty", "UOM"],
-                    column_config={
-                        "Unit_Price": st.column_config.NumberColumn(
-                            "Unit Price (IDR)",
-                            format="Rp %d",
-                            min_value=0,
-                            step=1000,
-                        ),
-                        "Ready_Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=True),
-                    },
-                )
+        # TAMPILAN CARD LIST RFQ
+        else:
+            st.header("📋 List RFQ Aktif")
+            st.write("Klik **Buka Detail** untuk mengisi penawaran harga:")
+            st.markdown("---")
 
-                if st.button(f"🚀 Kirim Penawaran", key=f"save_{group['pr_id']}"):
-                    for idx, r in edited.iterrows():
-                        ass_id = df_preview.iloc[idx]["assignment_id"]
-                        submit_quote(ass_id, vendor_id, r["Unit_Price"], r["Brand"], r["Lead_Time_Days"], r["Ready_Stock"])
-                    st.success(f"🎉 Penawaran untuk '{title}' berhasil dikirim!")
-                    st.session_state[f"fill_active_{group['pr_id']}"] = False
-                    st.rerun()
+            for pr_id, group in pr_groups.items():
+                prio_tag = "🚨 URGENT" if "URGENT" in group["prio"].upper() else "📦 NORMAL"
+                
+                with st.container(border=True):
+                    c_info, c_btn = st.columns([4, 1])
+
+                    with c_info:
+                        st.subheader(f"📋 {group['title']}")
+                        # INFO PIC DITAMBAHKAN PADA CARD LIST
+                        st.caption(f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} | **Priority:** {prio_tag} | **PR Code:** {group['pr_code']}")
+                    
+                    with c_btn:
+                        st.write(" ")
+                        if st.button("🔍 Buka Detail", key=f"v_detail_{pr_id}", type="primary", use_container_width=True):
+                            st.session_state["active_vendor_rfq_id"] = pr_id
+                            st.rerun()
+
+    # -----------------------------------------------------------------
+    # MENU 3: HISTORY RFQ
+    # -----------------------------------------------------------------
+    elif selected_v_page == "History RFQ":
+        st.header("🔍 History Penawaran Saya")
+        res_hist = (
+            sb.table("quotes")
+            .select("unit_price, brand, ready_stock, lead_time_days, created_at, rfq_assignments(status, pr_items(description, description2, quantity, uom, purchase_requests(rfq_title, pr_code, profiles(vendor_name)))))")
+            .eq("vendor_id", vendor_id)
+            .execute()
+        )
+        
+        if not res_hist.data:
+            st.info("Belum ada riwayat penawaran terkirim.")
+        else:
+            rows_h = []
+            for q in res_hist.data:
+                ass = q.get("rfq_assignments") or {}
+                item = ass.get("pr_items") or {}
+                pr = item.get("purchase_requests") or {}
+                pic_p = pr.get("profiles") or {}
+                pic_name = pic_p.get("vendor_name") or "-"
+
+                # FORMAT HARGA XXX.XXX BER-TITIK DI HISTORY
+                formatted_price = f"Rp {q.get('unit_price', 0):,.0f}".replace(",", ".")
+
+                rows_h.append({
+                    "Judul RFQ": pr.get("rfq_title") or pr.get("pr_code"),
+                    "PIC Procurement": pic_name,
+                    "Deskripsi": clean_description(item.get("description")),
+                    "Qty": item.get("quantity"),
+                    "UOM": item.get("uom"),
+                    "Harga Unit": formatted_price,
+                    "Brand": q.get("brand"),
+                    "Ready Stock": q.get("ready_stock"),
+                    "Lead Time": f"{q.get('lead_time_days')} hari",
+                    "Tanggal Submit": q.get("created_at")[:10] if q.get("created_at") else "-",
+                })
+            st.dataframe(pd.DataFrame(rows_h), hide_index=True, use_container_width=True)
 
 
 # =====================================================================
@@ -1205,6 +1341,7 @@ def combined_admin_portal():
 
 
 def main():
+    # Keep Alive Session State Login
     if "user_info" not in st.session_state:
         st.session_state["user_info"] = None
     if "selected_items_dict" not in st.session_state:
@@ -1216,7 +1353,7 @@ def main():
 
     user = st.session_state["user_info"]
     
-    # Header Profile di Sidebar
+    # Header Profil di Sidebar
     st.sidebar.markdown(f"### 👋 Hi, **{user.get('vendor_name') or user.get('email')}**")
     st.sidebar.caption(f"Role: `{user.get('role', '').upper()}`")
     
@@ -1224,13 +1361,12 @@ def main():
         st.session_state["user_info"] = None
         st.session_state["selected_items_dict"] = {}
         st.session_state["active_compare_pr_id"] = None
+        st.session_state["active_vendor_rfq_id"] = None
         st.rerun()
         
     st.sidebar.markdown("---")
 
-    if user["role"] == "admin":
-        combined_admin_portal()
-    elif user["role"] == "proc":
+    if user["role"] in ["admin", "proc"]:
         combined_admin_portal()
     else:
         vendor_portal(user["id"])
