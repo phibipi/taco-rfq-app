@@ -1091,40 +1091,45 @@ def vendor_portal(vendor_id):
 
 
 # =====================================================================
-# COMBINED ADMIN PORTAL (SIDEBAR NAVIGATION)
+# COMBINED ADMIN PORTAL (CUSTOM BUTTON SIDEBAR UI)
 # =====================================================================
 def combined_admin_portal():
-    # Inisialisasi state halaman aktif jika belum ada
     if "current_page" not in st.session_state:
         st.session_state["current_page"] = "📥 Import PR List"
 
-    # Sidebar Menu untuk Navigasi Utama
-    st.sidebar.markdown("### 📌 Menu Navigasi")
-    page_selection = st.sidebar.radio(
-        "Pilih Menu:",
-        [
-            "📥 Import PR List", 
-            "📊 Monitoring & Comparison", 
-            "🔍 History RFQ",
-            "➕ Daftarkan PIC", 
-            "➕ Daftarkan Vendor", 
-            "👥 Daftar User", 
-            "🔑 Reset Password"
-        ],
-        index=["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History RFQ", "➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User", "🔑 Reset Password"].index(st.session_state["current_page"]) if st.session_state["current_page"] in ["📥 Import PR List", "📊 Monitoring & Comparison", "🔍 History RFQ", "➕ Daftarkan PIC", "➕ Daftarkan Vendor", "👥 Daftar User", "🔑 Reset Password"] else 0
-    )
+    # UI Custom Sidebar Navigation
+    st.sidebar.markdown("## 🧭 Navigasi Menu")
+    st.sidebar.markdown("---")
 
-    # Sinkronisasi pilihan sidebar ke session state
-    if page_selection != st.session_state.get("current_page_selected"):
-        st.session_state["current_page"] = page_selection
-        st.session_state["current_page_selected"] = page_selection
+    menu_options = [
+        ("📥 Import PR List", "proc_import"),
+        ("📊 Price Comparison", "proc_compare"),
+        ("🔍 History RFQ", "proc_history"),
+        ("➕ Daftarkan PIC", "admin_pic"),
+        ("➕ Daftarkan Vendor", "admin_vendor"),
+        ("👥 Daftar User", "admin_users"),
+        ("🔑 Reset Password", "admin_reset"),
+    ]
+
+    # Render Setiap Menu Sebagai Tombol Custom
+    for label, page_id in menu_options:
+        is_active = (st.session_state["current_page"] == label)
+        
+        # Tombol diberi tipe 'primary' jika halaman sedang aktif biar kelihatan beda & cakep
+        btn_type = "primary" if is_active else "secondary"
+        
+        if st.sidebar.button(label, key=f"nav_btn_{page_id}", type=btn_type, use_container_width=True):
+            st.session_state["current_page"] = label
+            st.rerun()
+
+    st.sidebar.markdown("---")
 
     # Routing Halaman berdasarkan Pilihan
     selected_page = st.session_state["current_page"]
 
     if selected_page == "📥 Import PR List":
         proc_portal_import()
-    elif selected_page == "📊 Monitoring & Comparison":
+    elif selected_page == "📊 Price Comparison":
         proc_portal_comparison()
     elif selected_page == "🔍 History RFQ":
         proc_portal_history()
@@ -1150,19 +1155,22 @@ def main():
 
     user = st.session_state["user_info"]
     
-    # Header User & Logout di Sidebar
-    st.sidebar.title(f"👋 {user.get('vendor_name') or user.get('email')}")
-    st.sidebar.caption(f"Role: **{user.get('role', '').upper()}**")
+    # Header Profile di Sidebar
+    st.sidebar.markdown(f"### 👋 Hi, **{user.get('vendor_name') or user.get('email')}**")
+    st.sidebar.caption(f"Role: `{user.get('role', '').upper()}`")
+    
     if st.sidebar.button("🚪 Log Out", use_container_width=True):
         st.session_state["user_info"] = None
         st.session_state["selected_items_dict"] = {}
         st.session_state["active_compare_pr_id"] = None
         st.rerun()
+        
+    st.sidebar.markdown("---")
 
     if user["role"] == "admin":
         combined_admin_portal()
     elif user["role"] == "proc":
-        combined_admin_portal()  # Gunakan sidebar yang sama untuk PROC
+        combined_admin_portal()
     else:
         vendor_portal(user["id"])
 
