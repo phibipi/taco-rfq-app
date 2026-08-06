@@ -413,7 +413,7 @@ def render_ai_insight(df_display, rfq_title):
     api_key = st.secrets["gemini"]["api_key"].strip()
     genai.configure(api_key=api_key)
 
-    st.markdown("### 🤖 Executive AI Procurement Insight")
+    st.markdown("### 🤖 AI Procurement Insight")
     
     insight_key = f"ai_insight_{rfq_title}"
     
