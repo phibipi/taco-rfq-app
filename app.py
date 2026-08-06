@@ -439,7 +439,7 @@ SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADI
 (Berikan penjelasan SINGKAT dan PENTING mengenai spesifikasi dan merk produk, tipe, atau jenisnya, dan kegunaannya)
 
 ### 💡 Rekomendasi Merk Alternative:
-(Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya)
+(Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya, atau rekomendasi vendor sesuai lokasi)
 
 ### ⚠️ Catatan Penting untuk Procurement:
 (Sorot jika ada vendor yang harganya terindikasi jauh diatas harga pasar/overpriced/typo kuantitas, atau lead time terlalu lama)
