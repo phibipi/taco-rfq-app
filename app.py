@@ -764,19 +764,43 @@ def proc_portal_comparison():
         st.title(f"📊 {rfq_title_active}")
         st.caption(f"📍 Lokasi Pengiriman: **{loc_active}** | No. PR: **{pr_info['pr_code']}**")
 
-        # Control Action: Mark as Submitted / Relive
+        # Control Action: Mark as Submitted / Relive per RFQ
         st.divider()
         c_sub, c_relive, _ = st.columns([2, 2, 3])
+        
         with c_sub:
-            if st.button("🔒 Mark as Submitted (Selesai)", use_container_width=True):
-                sb.table("rfq_assignments").update({"status": "Submitted"}).execute()
-                st.success("RFQ berhasil ditandai sebagai 'Submitted'!")
-                st.rerun()
+            if st.button("🔒 Mark as Submitted (Selesai)", use_container_width=True, type="primary"):
+                try:
+                    # 1. Ambil list item_id milik RFQ/PR yang sedang aktif
+                    items_res = sb.table("pr_items").select("id").eq("pr_id", active_id).execute()
+                    item_ids = [i["id"] for i in items_res.data] if items_res.data else []
+        
+                    if item_ids:
+                        # 2. Update status rfq_assignments dengan filter .in_()
+                        sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
+                        st.success(f"🎉 RFQ '{rfq_title_active}' berhasil ditandai sebagai 'Submitted'!")
+                        st.session_state["active_compare_pr_id"] = None
+                        st.rerun()
+                    else:
+                        st.warning("Tidak ada item yang ditemukan untuk RFQ ini.")
+                except Exception as e:
+                    st.error(f"Gagal memperbarui status: {e}")
+        
         with c_relive:
             if st.button("🔓 Relive / Re-open RFQ", use_container_width=True):
-                sb.table("rfq_assignments").update({"status": "Open"}).execute()
-                st.success("RFQ berhasil dibuka kembali!")
-                st.rerun()
+                try:
+                    items_res = sb.table("pr_items").select("id").eq("pr_id", active_id).execute()
+                    item_ids = [i["id"] for i in items_res.data] if items_res.data else []
+        
+                    if item_ids:
+                        # Update status kembali ke Open dengan filter .in_()
+                        sb.table("rfq_assignments").update({"status": "Open"}).in_("item_id", item_ids).execute()
+                        st.success(f"🔓 RFQ '{rfq_title_active}' berhasil dibuka kembali!")
+                        st.rerun()
+                    else:
+                        st.warning("Tidak ada item yang ditemukan untuk RFQ ini.")
+                except Exception as e:
+                    st.error(f"Gagal memperbarui status: {e}")
 
         st.markdown("---")
         st.subheader("📋 Matrix Perbandingan Penawaran Vendor")
