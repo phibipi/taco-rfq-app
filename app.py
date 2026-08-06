@@ -435,19 +435,22 @@ DATA PERBANDINGAN:
 Tugasmu adalah memberikan analisis otomatis tanpa perlu ditanya.
 SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADING & BULLET POINT KONSISTEN):
 
-### 💡 Rekomendasi Merk Alternative:
-(Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item di atas, cantumkan estimasi harga pasar & keunggulannya)
+### ❓Penjelasan Produk:
+(Berikan penjelasan SINGKAT dan PENTING mengenai spesifikasi dan merk produk, tipe, atau jenisnya, dan kegunaannya)
 
-### ⚠️ Catatan Penting Procurement (Alert):
+### 💡 Rekomendasi Merk Alternative:
+(Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya)
+
+### ⚠️ Catatan Penting untuk Procurement:
 (Sorot jika ada vendor yang harganya terindikasi jauh diatas harga pasar/overpriced/typo kuantitas, atau lead time terlalu lama)
 
-### 🎯 Action Plan PIC:
-(Berikan langkah konkret 1, 2, 3 untuk PIC Procurement, misal: klarifikasi typo, negosiasi target harga, atau minta RFQ ulang merk alternatif)
+### 🎯 Rekomendasi Action Plan PIC:
+(Berikan langkah konkret 1, 2, 3 untuk PIC Procurement, misal: klarifikasi typo, negosiasi target harga, atau minta RFQ ulang merk alternatif. pertimbangkan juga jika barang tersebut dicatat urgent, maka pilih alternatif yang paling sesuai)
 
 Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
 """
 
-        with st.spinner("⚡ AI sedang menganalisis penawaran vendor & harga pasar..."):
+        with st.spinner("⚡ AI sedang menganalisis..."):
             try:
                 active_models = [
                     m.name for m in genai.list_models()
