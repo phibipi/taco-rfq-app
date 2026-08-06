@@ -851,20 +851,33 @@ def proc_portal_comparison():
 
                         # Tracking singkat vendor
                         # FIX: Tambahkan pr_items!inner(pr_id) di dalam .select()
+                        # Query join relasi rfq_assignments & pr_items
                         res_ass = (
                             sb.table("rfq_assignments")
                             .select("*, profiles(vendor_name), pr_items!inner(pr_id)")
                             .eq("pr_items.pr_id", pr_id)
                             .execute()
                         )
+                        
                         if res_ass.data:
-                            v_names = []
+                            # FIX: Pakai dictionary biar nama vendor tidak terduplikasi (kedobel)
+                            vendor_status_map = {}
                             for ass in res_ass.data:
                                 vn = (ass.get("profiles") or {}).get("vendor_name", "Vendor")
                                 is_sub = ass["id"] in submitted_ass_ids
-                                icon = "✅" if is_sub else "⏳"
-                                v_names.append(f"{vn} {icon}")
-                            st.write("**Status Vendor:** " + " | ".join(v_names))
+                                
+                                # Jika vendor sudah pernah tercatat dan salah satu statusnya sudah submit, pertahankan status True
+                                if vn in vendor_status_map:
+                                    vendor_status_map[vn] = vendor_status_map[vn] or is_sub
+                                else:
+                                    vendor_status_map[vn] = is_sub
+                        
+                            # Format tampilan yang sudah unik (bebas terdobel)
+                            v_display_list = [
+                                f"{vn} {'✅' if is_sub else '⏳'}" 
+                                for vn, is_sub in vendor_status_map.items()
+                            ]
+                            st.write("**Status Vendor:** " + " | ".join(v_display_list))
 
                     with c_btn:
                         st.write(" ")
