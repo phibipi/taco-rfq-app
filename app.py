@@ -430,7 +430,7 @@ def send_rfq_email(vendor_email, vendor_name, rfq_title, deadline_str, items_tex
 
 
 # =====================================================================
-# AI EXECUTIVE INSIGHT (AUTOMATIC ANALYSIS)
+# AI EXECUTIVE INSIGHT + CHAT PROMPT MANUAL
 # =====================================================================
 def render_ai_insight(df_display, rfq_title):
     if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
@@ -446,16 +446,17 @@ def render_ai_insight(df_display, rfq_title):
     api_key = st.secrets["gemini"]["api_key"].strip()
     genai.configure(api_key=api_key)
 
-    st.markdown("### 🤖 AI Procurement Insight")
+    st.markdown("---")
+    st.markdown("### 🤖 Executive AI Procurement Insight & Assistant")
     
     insight_key = f"ai_insight_{rfq_title}"
+    history_key = f"ai_history_{rfq_title}"
     
-    # Tombol untuk trigger atau re-generate analisis AI
-    col_a, _ = st.columns([1, 3])
-    btn_generate = col_a.button("✨ Analisis Ulang AI", key=f"btn_ai_{rfq_title}")
+    if history_key not in st.session_state:
+        st.session_state[history_key] = []
 
-    # Jalankan jika belum ada hasil analisis atau jika tombol di-klik
-    if btn_generate or insight_key not in st.session_state:
+    # 1. GENERATE OTOMATIS SAAT HALAMAN DIBUKA
+    if insight_key not in st.session_state:
         context_table = df_display.to_csv(index=False)
         
         # SYSTEM PROMPT DIPAKSA DI BELAKANG LAYAR
@@ -482,47 +483,47 @@ SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADI
 
 Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
 """
-
-        with st.spinner("⚡ AI sedang menganalisis..."):
+        with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
             try:
-                active_models = [
-                    m.name for m in genai.list_models()
-                    if "generateContent" in m.supported_generation_methods
-                ]
-                
-                candidate_models = []
-                for target in ["flash", "pro"]:
-                    candidate_models.extend([m for m in active_models if target in m])
-                candidate_models.extend([m for m in active_models if m not in candidate_models])
-
-                if not candidate_models:
-                    candidate_models = ["models/gemini-1.5-flash", "models/gemini-2.0-flash"]
-
-                answer = None
-                for m_name in candidate_models:
-                    try:
-                        model = genai.GenerativeModel(m_name)
-                        res = model.generate_content(prompt)
-                        if res and res.text:
-                            answer = res.text
-                            break
-                    except Exception:
-                        continue
-
-                if answer:
-                    st.session_state[insight_key] = answer
-                else:
-                    st.warning("⏳ Kuota API sedang cooldown. Silakan klik tombol 'Analisis Ulang AI' dalam beberapa detik.")
-                    return
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                res = model.generate_content(prompt)
+                if res and res.text:
+                    st.session_state[insight_key] = res.text
             except Exception as e:
-                st.error(f"Gagal memproses AI: {e}")
-                return
+                st.session_state[insight_key] = f"⚠️ AI Insight Cooldown / Error: {e}"
 
-    # TAMPILKAN HASILNYA SECARA OTOMATIS
+    # Tampilkan Hasil Analisis Otomatis
     if insight_key in st.session_state:
         with st.container(border=True):
             st.markdown(st.session_state[insight_key])
 
+    # 2. PROMPT BAR CHAT MANUAL (USER BISA NANYA TAMBAHAN)
+    st.markdown("##### 💬 Tanya AI seputar penawaran ini:")
+    
+    # Display Riwayat Chat Manual
+    for msg in st.session_state[history_key]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat Input Box
+    user_prompt = st.chat_input("Contoh: 'Berapa total potensi hemat jika saya pilih Vendor A?'")
+    if user_prompt:
+        st.session_state[history_key].append({"role": "user", "content": user_prompt})
+        with st.chat_message("user"):
+            st.markdown(user_prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Mengolah jawaban..."):
+                try:
+                    context_table = df_display.to_csv(index=False)
+                    full_query = f"Data CQR:\n{context_table}\n\nPertanyaan User: {user_prompt}"
+                    model = genai.GenerativeModel("gemini-1.5-flash")
+                    response = model.generate_content(full_query)
+                    answer = response.text if response else "Maaf, AI tidak dapat merespons."
+                    st.markdown(answer)
+                    st.session_state[history_key].append({"role": "assistant", "content": answer})
+                except Exception as err:
+                    st.error(f"Gagal memproses prompt: {err}")
 
 
 def show_login():
@@ -840,63 +841,75 @@ def proc_portal_comparison():
             ["Harga Termurah (Lowest Price)", "Lead Time Tercepat", "Ready Stock Utama", "Kombinasi Bobot Skor (Default)"]
         )
 
+        # Query data quotes & assignments untuk CQR Matrix Format
         raw_q = sb.table("quotes").select("*, rfq_assignments(*, pr_items(*), profiles(*))").execute()
         data_matrix = []
         vendors_in_pr = set()
-
+        
         for q in raw_q.data or []:
             ass = q.get("rfq_assignments") or {}
             item = ass.get("pr_items") or {}
+            
             if item.get("pr_id") == active_id:
                 v_name = (ass.get("profiles") or {}).get("vendor_name", "Unknown")
                 vendors_in_pr.add(v_name)
+                
+                # Concat Description 1 + Description 2
+                d1 = str(item.get("description") or "").strip()
+                d2 = str(item.get("description2") or "").strip()
+                full_item_name = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
+                clean_name = clean_description(full_item_name)
+        
                 data_matrix.append({
-                    "description": item.get("description"),
-                    "spec": item.get("description2"),
-                    "qty": item.get("quantity", 0),
-                    "uom": item.get("uom"),
+                    "Barang": clean_name,
+                    "Spesifikasi Vendor": q.get("spec_vendor", "-"),
+                    "Qty": item.get("quantity", 0),
+                    "UOM": item.get("uom", "-"),
                     "vendor": v_name,
                     "price": q.get("unit_price", 0),
                     "total": q.get("unit_price", 0) * item.get("quantity", 0),
-                    "lead_time": q.get("lead_time_days", 99),
-                    "ready_stock": q.get("ready_stock", "Tidak")
+                    "brand": q.get("brand", "-"),
+                    "lead_time": q.get("lead_time_days", "-"),
+                    "ready_stock": q.get("ready_stock", "-"),
                 })
-
+        
         if not data_matrix:
             st.warning("Belum ada penawaran harga yang masuk dari vendor untuk RFQ ini.")
         else:
             df_m = pd.DataFrame(data_matrix)
-
-            # POIN 8: Logic Pengurutan Vendor berdasarkan Prioritas
-            if sort_priority == "Harga Termurah (Lowest Price)":
-                df_m = df_m.sort_values(by="price", ascending=True)
-            elif sort_priority == "Lead Time Tercepat":
-                df_m = df_m.sort_values(by="lead_time", ascending=True)
-            elif sort_priority == "Ready Stock Utama":
-                df_m["stock_order"] = df_m["ready_stock"].apply(lambda x: 0 if str(x).lower() == "ya" else 1)
-                df_m = df_m.sort_values(by=["stock_order", "price"], ascending=[True, True])
-
-            pivot_items = df_m[["description", "spec", "qty", "uom"]].drop_duplicates().reset_index(drop=True)
-
+            
+            # Pivot Barang Unik (Format CQR PDF Style)
+            pivot_items = df_m[["Barang", "Qty", "UOM"]].drop_duplicates().reset_index(drop=True)
+        
             for v in sorted(list(vendors_in_pr)):
-                prices = []
-                totals = []
+                price_cols = []
+                spec_cols = []
+                
                 for _, r in pivot_items.iterrows():
-                    match = df_m[(df_m["description"] == r["description"]) & (df_m["spec"] == r["spec"]) & (df_m["vendor"] == v)]
+                    match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == v)]
                     if not match.empty:
-                        p = match["price"].values[0]
-                        t = match["total"].values[0]
-                        prices.append(f"Rp {p:,.0f}".replace(",", "."))
-                        totals.append(f"Rp {t:,.0f}".replace(",", "."))
+                        row_val = match.iloc[0]
+                        p_str = f"Rp {row_val['price']:,.0f}".replace(",", ".")
+                        price_cols.append(p_str)
+                        spec_cols.append(f"{row_val['brand']} | Stock: {row_val['ready_stock']}")
                     else:
-                        prices.append("Rp 0")
-                        totals.append("Rp 0")
-
-                pivot_items[f"{v} - Price/Unit"] = prices
-                pivot_items[f"{v} - Total Price"] = totals
-
-            # Display Table
-            st.dataframe(pivot_items, hide_index=True, use_container_width=True)
+                        price_cols.append("Rp 0")
+                        spec_cols.append("-")
+        
+                pivot_items[f"[{v}] Price/Unit"] = price_cols
+                pivot_items[f"[{v}] Spec & Brand"] = spec_cols
+        
+            # Display Tabel CQR Read-Only
+            st.dataframe(
+                pivot_items, 
+                hide_index=True, 
+                use_container_width=True,
+                column_config={
+                    "Barang": st.column_config.TextColumn("Barang", width="large"),
+                    "Qty": st.column_config.NumberColumn("Qty", width="small"),
+                    "UOM": st.column_config.TextColumn("UOM", width="small")
+                }
+            )
 
             # Export Excel
             output = io.BytesIO()
@@ -1258,71 +1271,83 @@ def vendor_portal(vendor_id):
             if attachments:
                 st.markdown("**📎 File Referensi Lampiran:** " + ", ".join(f"`{a['file_name']}`" for a in attachments))
 
-            # Data Preview & Existing Quotes Items
+            # Data Preview Items untuk Vendor (Concat Description + Description2)
             table_rows = []
             for a in group["rows"]:
                 item = a.get("pr_items") or {}
-                raw_desc = item.get("description", "-")
-                clean_desc = clean_description(raw_desc)
+                
+                # 1. Concat Description + Description 2
+                d1 = str(item.get("description") or "").strip()
+                d2 = str(item.get("description2") or "").strip()
+                full_desc = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
+                clean_item_name = clean_description(full_desc)
             
-                # FIX: Cek apakah sudah ada quote lama dari vendor ini
+                # 2. Ambil data quote lama jika ada
                 existing_quotes = a.get("quotes") or []
-                # Ambil quote paling terakhir jika ada
                 last_quote = existing_quotes[-1] if existing_quotes else {}
-            
-                # Gunakan harga/brand lama jika ada, jika belum ada pakai default (0)
-                old_price = last_quote.get("unit_price", 0)
-                old_brand = last_quote.get("brand", "-")
-                old_stock = last_quote.get("ready_stock", "Ya")
-                old_lead = last_quote.get("lead_time_days", 7)
             
                 table_rows.append({
                     "assignment_id": a["id"],
-                    "Deskripsi": clean_desc,
-                    "Spesifikasi": item.get("description2", "-"),
+                    "Barang": clean_item_name,                     # Concat Nama Barang
+                    "Spesifikasi Vendor": last_quote.get("spec_vendor", "-"), # Diisi Vendor
                     "Qty": item.get("quantity", 0),
                     "UOM": item.get("uom", "-"),
-                    "Unit_Price": old_price,      # <- Mengisi harga lama (tidak jadi 0 lagi!)
-                    "Brand": old_brand,            # <- Mengisi brand lama
-                    "Ready_Stock": old_stock,      # <- Mengisi ready stock lama
-                    "Lead_Time_Days": old_lead,    # <- Mengisi lead time lama
+                    "Unit Price (IDR)": last_quote.get("unit_price", 0),
+                    "Brand": last_quote.get("brand", "-"),
+                    "Ready Stock": last_quote.get("ready_stock", "Ya"),
+                    "Lead Time (Hari)": last_quote.get("lead_time_days", 7),
                 })
             
             df_preview = pd.DataFrame(table_rows)
-
+            
             st.markdown("##### ✏️ Masukkan Harga & Detail Penawaran:")
             
-            # FORMAT HARGA XXX.XXX BER-TITIK DI DATA EDITOR
+            # 3. Data Editor Vendor dengan Column Configuration & Word-Wrap
             edited = st.data_editor(
                 df_preview.drop(columns=["assignment_id"]),
                 key=f"editor_v_{active_rfq_id}",
                 hide_index=True,
                 use_container_width=True,
-                disabled=["Deskripsi", "Spesifikasi", "Qty", "UOM"],
+                disabled=["Barang", "Qty", "UOM"], # Barang, Qty, UOM dikunci
                 column_config={
-                    "Unit_Price": st.column_config.NumberColumn(
+                    "Barang": st.column_config.TextColumn(
+                        "Barang",
+                        width="medium", # Lebar sedang & Word-wrap otomatis
+                        help="Nama Barang & Deskripsi Utama"
+                    ),
+                    "Spesifikasi Vendor": st.column_config.TextColumn(
+                        "Spesifikasi Vendor",
+                        width="medium",
+                        help="Tuliskan spesifikasi detail merk/tipe barang yang Anda tawarkan"
+                    ),
+                    "Qty": st.column_config.NumberColumn("Qty", width="small"),
+                    "UOM": st.column_config.TextColumn("UOM", width="small"),
+                    "Unit Price (IDR)": st.column_config.NumberColumn(
                         "Unit Price (IDR)",
-                        format="Rp %,d",  # Titik ribuan otomatis (Rp 1.000.000)
+                        format="Rp %,d",
                         min_value=0,
                         step=1000,
                     ),
-                    "Ready_Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=True),
-                    "Lead_Time_Days": st.column_config.NumberColumn("Lead Time (Hari)", min_value=1, step=1),
+                    "Ready Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=True),
+                    "Lead Time (Hari)": st.column_config.NumberColumn("Lead Time (Hari)", min_value=1, step=1),
                 },
             )
-
-            if st.button("🚀 Kirim Penawaran", type="primary", use_container_width=True):
+            
+            if st.button("🚀 Kirim Penawaran Now", type="primary", use_container_width=True):
                 for idx, r in edited.iterrows():
                     ass_id = df_preview.iloc[idx]["assignment_id"]
-                    submit_quote(
-                        ass_id, 
-                        vendor_id, 
-                        r["Unit_Price"], 
-                        r["Brand"], 
-                        r["Lead_Time_Days"], 
-                        r["Ready_Stock"]
-                    )
-                st.success(f"🎉 Penawaran untuk '{group['title']}' berhasil terkirim ke PIC {group['pic_name']}!")
+                    # Update submit quote dengan menyertakan spesifikasi vendor
+                    sb.table("quotes").upsert({
+                        "assignment_id": ass_id,
+                        "vendor_id": vendor_id,
+                        "unit_price": r["Unit Price (IDR)"],
+                        "brand": r["Brand"],
+                        "lead_time_days": r["Lead Time (Hari)"],
+                        "ready_stock": r["Ready Stock"],
+                        "spec_vendor": r["Spesifikasi Vendor"]
+                    }).execute()
+                    
+                st.success(f"🎉 Penawaran berhasil dikirim!")
                 st.session_state["active_vendor_rfq_id"] = None
                 st.rerun()
 
