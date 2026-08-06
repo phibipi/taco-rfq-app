@@ -335,7 +335,7 @@ def get_history_data():
 def get_vendor_assignments(vendor_id):
     res = (
         sb.table("rfq_assignments")
-        .select("*, pr_items(*, purchase_requests(*, profiles!purchase_requests_uploaded_by_fkey(vendor_name, email)))")
+        .select("*, quotes(*), pr_items(*, purchase_requests(*, profiles(vendor_name, email)))")
         .eq("vendor_id", vendor_id)
         .eq("status", "Open")
         .execute()
@@ -349,16 +349,28 @@ def get_pr_attachments(pr_id):
 
 
 def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock):
-    sb.table("quotes").insert(
-        {
+    # Cek apakah sudah ada quote sebelumnya untuk assignment ini
+    existing = sb.table("quotes").select("id").eq("assignment_id", assignment_id).eq("vendor_id", vendor_id).execute()
+    
+    if existing.data:
+        # Update data penawaran yang sudah ada
+        quote_id = existing.data[0]["id"]
+        sb.table("quotes").update({
+            "unit_price": unit_price,
+            "brand": brand,
+            "lead_time_days": lead_time_days,
+            "ready_stock": ready_stock,
+        }).eq("id", quote_id).execute()
+    else:
+        # Insert penawaran baru jika belum pernah isi
+        sb.table("quotes").insert({
             "assignment_id": assignment_id,
             "vendor_id": vendor_id,
             "unit_price": unit_price,
             "brand": brand,
             "lead_time_days": lead_time_days,
             "ready_stock": ready_stock,
-        }
-    ).execute()
+        }).execute()
 
 
 # =====================================================================
@@ -1073,7 +1085,7 @@ def vendor_portal(vendor_id):
         st.session_state["vendor_page"] = "List RFQ Aktif"
 
     # Sidebar Navigation
-    st.sidebar.markdown("## 🧭 Navigasi Vendor")
+    st.sidebar.markdown("## 🧭 Navigasi Menu")
     st.sidebar.markdown("---")
 
     v_menus = [
@@ -1166,25 +1178,36 @@ def vendor_portal(vendor_id):
             if attachments:
                 st.markdown("**📎 File Referensi Lampiran:** " + ", ".join(f"`{a['file_name']}`" for a in attachments))
 
-            # Data Preview Items
+            # Data Preview & Existing Quotes Items
             table_rows = []
             for a in group["rows"]:
                 item = a.get("pr_items") or {}
                 raw_desc = item.get("description", "-")
                 clean_desc = clean_description(raw_desc)
-
+            
+                # FIX: Cek apakah sudah ada quote lama dari vendor ini
+                existing_quotes = a.get("quotes") or []
+                # Ambil quote paling terakhir jika ada
+                last_quote = existing_quotes[-1] if existing_quotes else {}
+            
+                # Gunakan harga/brand lama jika ada, jika belum ada pakai default (0)
+                old_price = last_quote.get("unit_price", 0)
+                old_brand = last_quote.get("brand", "-")
+                old_stock = last_quote.get("ready_stock", "Ya")
+                old_lead = last_quote.get("lead_time_days", 7)
+            
                 table_rows.append({
                     "assignment_id": a["id"],
                     "Deskripsi": clean_desc,
                     "Spesifikasi": item.get("description2", "-"),
                     "Qty": item.get("quantity", 0),
                     "UOM": item.get("uom", "-"),
-                    "Unit_Price": 0,
-                    "Brand": "-",
-                    "Ready_Stock": "Ya",
-                    "Lead_Time_Days": 7,
+                    "Unit_Price": old_price,      # <- Mengisi harga lama (tidak jadi 0 lagi!)
+                    "Brand": old_brand,            # <- Mengisi brand lama
+                    "Ready_Stock": old_stock,      # <- Mengisi ready stock lama
+                    "Lead_Time_Days": old_lead,    # <- Mengisi lead time lama
                 })
-
+            
             df_preview = pd.DataFrame(table_rows)
 
             st.markdown("##### ✏️ Masukkan Harga & Detail Penawaran:")
