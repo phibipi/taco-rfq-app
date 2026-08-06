@@ -847,7 +847,13 @@ def proc_portal_comparison():
                         st.caption(f"📍 **Lokasi:** {loc} | **Priority:** {tag_prio} | **PR Code:** {pr_row['pr_code']}")
 
                         # Tracking singkat vendor
-                        res_ass = sb.table("rfq_assignments").select("*, profiles(vendor_name)").eq("pr_items.pr_id", pr_id).execute()
+                        # FIX: Tambahkan pr_items!inner(pr_id) di dalam .select()
+                        res_ass = (
+                            sb.table("rfq_assignments")
+                            .select("*, profiles(vendor_name), pr_items!inner(pr_id)")
+                            .eq("pr_items.pr_id", pr_id)
+                            .execute()
+                        )
                         if res_ass.data:
                             v_names = []
                             for ass in res_ass.data:
