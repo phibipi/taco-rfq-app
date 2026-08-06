@@ -1208,7 +1208,7 @@ def vendor_portal(vendor_id):
                 },
             )
 
-            if st.button("🚀 Kirim Penawaran Now", type="primary", use_container_width=True):
+            if st.button("🚀 Kirim Penawaran", type="primary", use_container_width=True):
                 for idx, r in edited.iterrows():
                     ass_id = df_preview.iloc[idx]["assignment_id"]
                     submit_quote(
