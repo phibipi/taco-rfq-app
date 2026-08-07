@@ -840,6 +840,15 @@ def proc_portal_comparison():
             "Urutkan & Prioritaskan Berdasarkan:",
             ["Harga Termurah (Lowest Price)", "Lead Time Tercepat", "Ready Stock Utama", "Kombinasi Bobot Skor (Default)"]
         )
+        # Peta pilihan dropdown -> bobot skor (Harga, TOP, Ready Stock, Lead Time)
+        weight_presets = {
+            "Harga Termurah (Lowest Price)": (100, 0, 0, 0),
+            "Lead Time Tercepat": (0, 0, 0, 100),
+            "Ready Stock Utama": (0, 0, 100, 0),
+            "Kombinasi Bobot Skor (Default)": (40, 20, 20, 20),
+        }
+        w_price, w_top, w_stock, w_leadtime = weight_presets[sort_priority]
+        st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Ready Stock {w_stock}% · Lead Time {w_leadtime}%")
 
         # Query data quotes & assignments untuk CQR Matrix Format
         raw_q = sb.table("quotes").select("*, rfq_assignments(*, pr_items(*), profiles(*))").execute()
@@ -851,7 +860,8 @@ def proc_portal_comparison():
             item = ass.get("pr_items") or {}
             
             if item.get("pr_id") == active_id:
-                v_name = (ass.get("profiles") or {}).get("vendor_name", "Unknown")
+                v_profile = ass.get("profiles") or {}
+                v_name = v_profile.get("vendor_name", "Unknown")
                 vendors_in_pr.add(v_name)
                 
                 # Concat Description 1 + Description 2
@@ -869,52 +879,96 @@ def proc_portal_comparison():
                     "price": q.get("unit_price", 0),
                     "total": q.get("unit_price", 0) * item.get("quantity", 0),
                     "brand": q.get("brand", "-"),
-                    "lead_time": q.get("lead_time_days", "-"),
+                    "lead_time": q.get("lead_time_days", 0),
                     "ready_stock": q.get("ready_stock", "-"),
+                    "top_days": v_profile.get("top_days") or 0,
                 })
         
         if not data_matrix:
             st.warning("Belum ada penawaran harga yang masuk dari vendor untuk RFQ ini.")
         else:
             df_m = pd.DataFrame(data_matrix)
-            
-            # Pivot Barang Unik (Format CQR PDF Style)
+            vendor_list_sorted = sorted(list(vendors_in_pr))
+
+            # Barang unik jadi baris
             pivot_items = df_m[["Barang", "Qty", "UOM"]].drop_duplicates().reset_index(drop=True)
-        
-            for v in sorted(list(vendors_in_pr)):
-                price_cols = []
-                spec_cols = []
-                
+
+            price_lookup = {}   # (barang, vendor) -> harga numeric, buat highlight
+            recommended_vendor_per_item = {}  # barang -> nama vendor terbaik
+            recommended_total = 0
+
+            for idx, r in pivot_items.iterrows():
+                rows_for_item = df_m[df_m["Barang"] == r["Barang"]].copy()
+                rows_for_item = rows_for_item.rename(columns={
+                    "price": "unit_price", "lead_time": "lead_time_days",
+                })
+                scored = compute_recommendation(rows_for_item, w_price, w_top, w_stock, w_leadtime)
+
+                best_row = scored[scored["is_recommended"]].iloc[0] if not scored.empty and scored["is_recommended"].any() else None
+                if best_row is not None:
+                    recommended_vendor_per_item[r["Barang"]] = best_row["vendor"]
+                    recommended_total += float(best_row["unit_price"]) * float(r["Qty"] or 0)
+
+                for v in vendor_list_sorted:
+                    match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == v)]
+                    price_lookup[(r["Barang"], v)] = float(match.iloc[0]["price"]) if not match.empty else None
+
+            # Susun tabel tampilan: per vendor -> Price/Unit & Total Price (mirip format CQR)
+            display_df = pivot_items.copy()
+            for v in vendor_list_sorted:
+                price_col, total_col = [], []
                 for _, r in pivot_items.iterrows():
                     match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == v)]
                     if not match.empty:
                         row_val = match.iloc[0]
-                        p_str = f"Rp {row_val['price']:,.0f}".replace(",", ".")
-                        price_cols.append(p_str)
-                        spec_cols.append(f"{row_val['brand']} | Stock: {row_val['ready_stock']}")
+                        price_col.append(f"Rp {row_val['price']:,.0f}".replace(",", "."))
+                        total_col.append(f"Rp {row_val['total']:,.0f}".replace(",", "."))
                     else:
-                        price_cols.append("Rp 0")
-                        spec_cols.append("-")
-        
-                pivot_items[f"[{v}] Price/Unit"] = price_cols
-                pivot_items[f"[{v}] Spec & Brand"] = spec_cols
-        
-            # Display Tabel CQR Read-Only
+                        price_col.append("-")
+                        total_col.append("-")
+                display_df[f"{v} — Price/Unit"] = price_col
+                display_df[f"{v} — Total"] = total_col
+
+            display_df["🏆 Rekomendasi"] = display_df["Barang"].map(recommended_vendor_per_item).fillna("-")
+
+            # Baris Grand Total di bawah (khusus kolom Total per vendor)
+            grand_total_row = {"Barang": "GRAND TOTAL", "Qty": "", "UOM": ""}
+            for v in vendor_list_sorted:
+                vendor_total = df_m[df_m["vendor"] == v]["total"].sum()
+                grand_total_row[f"{v} — Price/Unit"] = ""
+                grand_total_row[f"{v} — Total"] = f"Rp {vendor_total:,.0f}".replace(",", ".")
+            grand_total_row["🏆 Rekomendasi"] = f"Rp {recommended_total:,.0f}".replace(",", ".")
+            display_df = pd.concat([display_df, pd.DataFrame([grand_total_row])], ignore_index=True)
+
+            # Styling: highlight sel harga vendor yang direkomendasikan per baris item (hijau)
+            def highlight_recommended_cells(row):
+                styles = [""] * len(row)
+                if row["Barang"] == "GRAND TOTAL":
+                    return ["font-weight: bold; background-color: #f1f5f9;"] * len(row)
+                best_vendor = recommended_vendor_per_item.get(row["Barang"])
+                for i, col in enumerate(row.index):
+                    if best_vendor and col in (f"{best_vendor} — Price/Unit", f"{best_vendor} — Total", "🏆 Rekomendasi"):
+                        styles[i] = "background-color: #d1fae5; font-weight: 600;"
+                return styles
+
+            st.markdown("##### 📋 Competitive Quotation Record (CQR)")
             st.dataframe(
-                pivot_items, 
-                hide_index=True, 
+                display_df.style.apply(highlight_recommended_cells, axis=1),
+                hide_index=True,
                 use_container_width=True,
+                row_height=55,
                 column_config={
                     "Barang": st.column_config.TextColumn("Barang", width="large"),
-                    "Qty": st.column_config.NumberColumn("Qty", width="small"),
-                    "UOM": st.column_config.TextColumn("UOM", width="small")
-                }
+                    "Qty": st.column_config.TextColumn("Qty", width="small"),
+                    "UOM": st.column_config.TextColumn("UOM", width="small"),
+                },
             )
+            st.info(f"💰 **Estimasi total belanja kalau ikuti rekomendasi di atas: Rp {recommended_total:,.0f}**".replace(",", "."))
 
-            # Export Excel
+            # Export Excel (pakai versi tanpa styling biar rapi dibuka di Excel)
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                pivot_items.to_excel(writer, index=False, sheet_name="CQR Matrix")
+                display_df.to_excel(writer, index=False, sheet_name="CQR Matrix")
             st.download_button(
                 "📥 Download CQR Comparison Matrix (Excel)",
                 output.getvalue(),
@@ -939,7 +993,7 @@ def proc_portal_comparison():
                     st.error(f"Gagal mengarsip RFQ: {e}")
 
             st.divider()
-            render_ai_insight(pivot_items, rfq_title_active)
+            render_ai_insight(display_df, rfq_title_active)
 
     # HALAMAN LIST DAFTAR RFQ
     else:
@@ -1308,6 +1362,7 @@ def vendor_portal(vendor_id):
                 key=f"editor_v_{active_rfq_id}",
                 hide_index=True,
                 use_container_width=True,
+                row_height=60,
                 disabled=["Barang", "Qty", "UOM"], # Barang, Qty, UOM dikunci
                 column_config={
                     "Barang": st.column_config.TextColumn(
