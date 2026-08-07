@@ -545,6 +545,108 @@ Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta
                     st.error(f"Gagal memproses prompt: {err}")
 
 
+def _strip_emoji_for_pdf(text):
+    """Reportlab base fonts gak support emoji -> nongol kotak. Buang emoji, sisa teksnya tetap."""
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F300-\U0001FAFF"
+        "\U00002600-\U000027BF"
+        "\U0001F1E6-\U0001F1FF"
+        "\U0001F900-\U0001F9FF"
+        "\U00002B00-\U00002BFF"
+        "\U0000FE0F"
+        "]+",
+        flags=re.UNICODE,
+    )
+    return emoji_pattern.sub("", str(text)).strip()
+
+
+def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_saving, saving_pct, recommended_total, ai_insight_text):
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    except ImportError:
+        return None
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=landscape(A4),
+        topMargin=15 * mm, bottomMargin=15 * mm, leftMargin=12 * mm, rightMargin=12 * mm,
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TitleCustom", parent=styles["Title"], fontSize=16, spaceAfter=4)
+    h2_style = ParagraphStyle("H2Custom", parent=styles["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor("#1f2937"))
+    normal_style = ParagraphStyle("NormalCustom", parent=styles["Normal"], fontSize=9, leading=12)
+    bullet_style = ParagraphStyle("BulletCustom", parent=normal_style, leftIndent=12)
+    ai_head_style = ParagraphStyle("AIHead", parent=normal_style, fontSize=10, fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=2)
+    header_cell_style = ParagraphStyle("TblHeader", parent=normal_style, fontSize=8, textColor=colors.white, fontName="Helvetica-Bold")
+    body_cell_style = ParagraphStyle("TblCell", parent=normal_style, fontSize=7.5, leading=9)
+
+    elements = []
+    elements.append(Paragraph("Competitive Quotation Record (CQR)", title_style))
+    elements.append(Paragraph(f"<b>{rfq_title}</b>", normal_style))
+    elements.append(Paragraph(
+        f"PR Code: {pr_code} | Lokasi: {location} | Tanggal: {datetime.now().strftime('%d %b %Y')}", normal_style
+    ))
+    elements.append(Spacer(1, 8))
+
+    weights_line = " &nbsp;|&nbsp; ".join(f"{k}: {v}%" for k, v in (weights or {}).items())
+    elements.append(Paragraph(f"<b>Bobot Prioritas:</b> {weights_line}", normal_style))
+    elements.append(Spacer(1, 4))
+    elements.append(Paragraph(
+        (f"<b>Potensi Cost Saving:</b> Rp {cost_saving:,.0f} ({saving_pct:.1f}%)"
+         f" &nbsp;&nbsp; <b>Total Estimasi (Rekomendasi):</b> Rp {recommended_total:,.0f}").replace(",", "."),
+        normal_style,
+    ))
+    elements.append(Spacer(1, 10))
+
+    elements.append(Paragraph("Tabel Perbandingan", h2_style))
+    raw_rows = [list(display_df.columns)] + [[str(v) for v in row] for row in display_df.values]
+    wrapped_data = []
+    for ri, row in enumerate(raw_rows):
+        style = header_cell_style if ri == 0 else body_cell_style
+        wrapped_data.append([Paragraph(_strip_emoji_for_pdf(val), style) for val in row])
+
+    n_cols = len(display_df.columns)
+    avail_width = landscape(A4)[0] - 24 * mm
+    barang_width = avail_width * 0.22
+    other_width = (avail_width - barang_width) / max(n_cols - 1, 1)
+    col_widths = [barang_width] + [other_width] * (n_cols - 1)
+
+    tbl = Table(wrapped_data, colWidths=col_widths, repeatRows=1)
+    last_row_idx = len(wrapped_data) - 1
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("BACKGROUND", (0, last_row_idx), (-1, last_row_idx), colors.HexColor("#e2e8f0")),
+    ]))
+    elements.append(tbl)
+    elements.append(Spacer(1, 14))
+
+    if ai_insight_text:
+        elements.append(Paragraph("AI Procurement Insight", h2_style))
+        for line in ai_insight_text.split("\n"):
+            line = _strip_emoji_for_pdf(line)
+            if not line:
+                continue
+            line_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+            if line_html.startswith("### "):
+                elements.append(Paragraph(line_html.replace("### ", ""), ai_head_style))
+            elif line_html.startswith(("- ", "* ")):
+                elements.append(Paragraph("• " + line_html[2:], bullet_style))
+            else:
+                elements.append(Paragraph(line_html, normal_style))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def show_login():
     st.title("🛠️ TACO Sparepart RFQ")
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -993,7 +1095,7 @@ def proc_portal_comparison():
                 use_container_width=True,
                 row_height=80,
                 column_config={
-                    "Barang": st.column_config.TextColumn("Barang", width="large"),
+                    "Barang": st.column_config.TextColumn("Barang", width=320),
                     "Qty": st.column_config.TextColumn("Qty", width="small"),
                     "UOM": st.column_config.TextColumn("UOM", width="small"),
                 },
@@ -1004,19 +1106,34 @@ def proc_portal_comparison():
             c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari skenario termahal")
             c_save2.metric("🎯 Total Estimasi (sesuai rekomendasi)", f"Rp {recommended_total:,.0f}".replace(",", "."))
 
-            # Export Excel (pakai versi tanpa styling biar rapi dibuka di Excel)
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                display_df.to_excel(writer, index=False, sheet_name="CQR Matrix")
-            st.download_button(
-                "📥 Download CQR Comparison Matrix (Excel)",
-                output.getvalue(),
-                f"CQR_{rfq_title_active}.xlsx",
-                use_container_width=True,
+            weights_dict = {"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime}
+
+            st.divider()
+            render_ai_insight(
+                display_df, rfq_title_active,
+                weights=weights_dict,
+                cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
             )
 
-            # POIN 1: Tombol Mark as Submitted Ditaruh di Bawah Download (Tombol Reopen Dihapus)
+            # PDF Download -- ditaruh SETELAH AI insight biar analisisnya ikut kecapture di PDF
+            ai_insight_text = st.session_state.get(f"ai_insight_{rfq_title_active}", "")
+            pdf_bytes = generate_cqr_pdf(
+                rfq_title_active, pr_info["pr_code"], loc_active, weights_dict,
+                display_df, cost_saving, saving_pct, recommended_total, ai_insight_text,
+            )
             st.write(" ")
+            if pdf_bytes:
+                st.download_button(
+                    "📄 Download CQR (PDF)",
+                    pdf_bytes,
+                    f"CQR_{rfq_title_active}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("⚠️ Library `reportlab` belum terinstall — tambahkan ke requirements.txt untuk mengaktifkan download PDF.")
+
+            # POIN 1: Tombol Mark as Submitted
             if st.button("🔒 Mark as Submitted (Selesai & Arsip)", type="primary", use_container_width=True):
                 try:
                     items_res = sb.table("pr_items").select("id").eq("pr_id", active_id).execute()
@@ -1030,13 +1147,6 @@ def proc_portal_comparison():
                         st.rerun()
                 except Exception as e:
                     st.error(f"Gagal mengarsip RFQ: {e}")
-
-            st.divider()
-            render_ai_insight(
-                display_df, rfq_title_active,
-                weights={"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime},
-                cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
-            )
 
     # HALAMAN LIST DAFTAR RFQ
     else:
