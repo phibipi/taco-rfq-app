@@ -1108,14 +1108,7 @@ def proc_portal_comparison():
 
             weights_dict = {"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime}
 
-            st.divider()
-            render_ai_insight(
-                display_df, rfq_title_active,
-                weights=weights_dict,
-                cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
-            )
-
-            # PDF Download -- ditaruh SETELAH AI insight biar analisisnya ikut kecapture di PDF
+                        # PDF Download -- ditaruh SETELAH AI insight biar analisisnya ikut kecapture di PDF
             ai_insight_text = st.session_state.get(f"ai_insight_{rfq_title_active}", "")
             pdf_bytes = generate_cqr_pdf(
                 rfq_title_active, pr_info["pr_code"], loc_active, weights_dict,
@@ -1147,6 +1140,15 @@ def proc_portal_comparison():
                         st.rerun()
                 except Exception as e:
                     st.error(f"Gagal mengarsip RFQ: {e}")
+
+            st.divider()
+            render_ai_insight(
+                display_df, rfq_title_active,
+                weights=weights_dict,
+                cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
+            )
+
+
 
     # HALAMAN LIST DAFTAR RFQ
     else:
