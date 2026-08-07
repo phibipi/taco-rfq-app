@@ -836,9 +836,11 @@ def proc_portal_comparison():
 
         # POIN 8: Filter Prioritas Pemilihan Vendor
         st.markdown("##### 🎯 Prioritas Pengurutan Penawaran:")
-        sort_priority = st.selectbox(
+        sort_priority = st.radio(
             "Urutkan & Prioritaskan Berdasarkan:",
-            ["Harga Termurah (Lowest Price)", "Lead Time Tercepat", "Ready Stock Utama", "Kombinasi Bobot Skor (Default)"]
+            ["Harga Termurah (Lowest Price)", "Lead Time Tercepat", "Ready Stock Utama", "Kombinasi Bobot Skor (Default)"],
+            horizontal=True,
+            label_visibility="collapsed",
         )
         # Peta pilihan dropdown -> bobot skor (Harga, TOP, Ready Stock, Lead Time)
         weight_presets = {
@@ -848,6 +850,17 @@ def proc_portal_comparison():
             "Kombinasi Bobot Skor (Default)": (40, 20, 20, 20),
         }
         w_price, w_top, w_stock, w_leadtime = weight_presets[sort_priority]
+        
+        with st.expander("⚙️ Atur bobot custom (opsional)"):
+            use_custom = st.checkbox("Pakai bobot custom di bawah ini, override preset di atas")
+            cw1, cw2, cw3, cw4 = st.columns(4)
+            cust_price = cw1.slider("💰 Harga", 0, 100, w_price)
+            cust_top = cw2.slider("📅 TOP", 0, 100, w_top)
+            cust_stock = cw3.slider("📦 Ready Stock", 0, 100, w_stock)
+            cust_leadtime = cw4.slider("⏱️ Lead Time", 0, 100, w_leadtime)
+            if use_custom:
+                w_price, w_top, w_stock, w_leadtime = cust_price, cust_top, cust_stock, cust_leadtime
+        
         st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Ready Stock {w_stock}% · Lead Time {w_leadtime}%")
 
         # Query data quotes & assignments untuk CQR Matrix Format
