@@ -432,7 +432,7 @@ def send_rfq_email(vendor_email, vendor_name, rfq_title, deadline_str, items_tex
 # =====================================================================
 # AI EXECUTIVE INSIGHT + CHAT PROMPT MANUAL
 # =====================================================================
-def render_ai_insight(df_display, rfq_title):
+def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, saving_pct=None, recommended_total=None):
     if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
         st.caption("💡 Fitur AI belum aktif — tambahkan `gemini.api_key` di secrets.")
         return
@@ -447,13 +447,20 @@ def render_ai_insight(df_display, rfq_title):
     genai.configure(api_key=api_key)
 
     st.markdown("---")
-    st.markdown("### 🤖 AI Procurement Assistant")
+    st.markdown("### 🤖 Executive AI Procurement Insight & Assistant")
     
     insight_key = f"ai_insight_{rfq_title}"
     history_key = f"ai_history_{rfq_title}"
     
     if history_key not in st.session_state:
         st.session_state[history_key] = []
+
+    weights_text = ", ".join(f"{k}: {v}%" for k, v in (weights or {}).items())
+    saving_text = (
+        f"Potensi cost saving dengan bobot ini: Rp {cost_saving:,.0f} ({saving_pct:.1f}% dari skenario termahal). "
+        f"Total estimasi belanja sesuai rekomendasi: Rp {recommended_total:,.0f}."
+        if cost_saving is not None else "Data cost saving tidak tersedia."
+    )
 
     # 1. GENERATE OTOMATIS SAAT HALAMAN DIBUKA
     if insight_key not in st.session_state:
@@ -463,14 +470,23 @@ def render_ai_insight(df_display, rfq_title):
         prompt = f"""Kamu adalah Procurement Specialist & Cost Analyst untuk TACO Group.
 Analisis data perbandingan penawaran vendor berikut untuk RFQ: {rfq_title}
 
-DATA PERBANDINGAN:
+DATA PERBANDINGAN (kolom "🏆 Rekomendasi" = vendor terbaik per item berdasarkan bobot yang dipilih PIC):
 {context_table}
+
+BOBOT PRIORITAS YANG DIPAKAI PIC SAAT INI: {weights_text}
+{saving_text}
 
 Tugasmu adalah memberikan analisis otomatis tanpa perlu ditanya.
 SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADING & BULLET POINT KONSISTEN):
 
 ### ❓Penjelasan Produk:
-(Berikan penjelasan SINGKAT dan PENTING mengenai spesifikasi dan merk produk, tipe, atau jenisnya, dan kegunaannya. misalkan ada beberapa barang yang sama tapi beda jenis atau spec, jelaskan bedanya apa)
+(Berikan penjelasan SINGKAT dan PENTING mengenai spesifikasi dan merk produk, tipe, atau jenisnya, dan kegunaannya)
+
+### 💰 Analisis Cost Saving & Trade-off:
+(Jelaskan angka cost saving di atas dengan bahasa manusia — worth it atau tidak. Untuk item-item di mana vendor rekomendasi BUKAN yang termurah, jelaskan trade-off-nya: kenapa vendor itu tetap direkomendasikan meski bukan termurah — misal karena TOP lebih panjang, stock ready, atau lead time lebih cepat. Sebutkan pro & cons konkret per item kalau ada perbedaan berarti.)
+
+### ⚖️ Evaluasi Bobot Prioritas:
+(Komentari apakah bobot yang dipilih PIC saat ini {weights_text} sudah pas untuk RFQ ini. Kalau ada indikasi bobot ini kurang optimal — misal barang urgent tapi bobot lead time kecil, atau nilai RFQ besar tapi bobot harga kecil — sarankan penyesuaian bobot yang lebih masuk akal beserta alasannya.)
 
 ### 💡 Rekomendasi Merk Alternative:
 (Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya, atau rekomendasi vendor sesuai lokasi)
@@ -483,9 +499,9 @@ SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADI
 
 Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
 """
-        with st.spinner("⚡ AI sedang menganalisis..."):
+        with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
             try:
-                model = genai.GenerativeModel("gemini-2.5-flash")
+                model = genai.GenerativeModel("gemini-flash-latest")
                 res = model.generate_content(prompt)
                 if res and res.text:
                     st.session_state[insight_key] = res.text
@@ -520,7 +536,7 @@ Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta
                 try:
                     context_table = df_display.to_csv(index=False)
                     full_query = f"Data CQR:\n{context_table}\n\nPertanyaan User: {user_prompt}"
-                    model = genai.GenerativeModel("gemini-2.5-flash")
+                    model = genai.GenerativeModel("gemini-flash-latest")
                     response = model.generate_content(full_query)
                     answer = response.text if response else "Maaf, AI tidak dapat merespons."
                     st.markdown(answer)
@@ -853,7 +869,7 @@ def proc_portal_comparison():
             "Kombinasi Bobot Skor (Default)": (40, 20, 20, 20),
         }
         w_price, w_top, w_stock, w_leadtime = weight_presets[sort_priority]
-        
+
         with st.expander("⚙️ Atur bobot custom (opsional)"):
             use_custom = st.checkbox("Pakai bobot custom di bawah ini, override preset di atas")
             cw1, cw2, cw3, cw4 = st.columns(4)
@@ -863,7 +879,7 @@ def proc_portal_comparison():
             cust_leadtime = cw4.slider("⏱️ Lead Time", 0, 100, w_leadtime)
             if use_custom:
                 w_price, w_top, w_stock, w_leadtime = cust_price, cust_top, cust_stock, cust_leadtime
-        
+
         st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Ready Stock {w_stock}% · Lead Time {w_leadtime}%")
 
         # Query data quotes & assignments untuk CQR Matrix Format
@@ -912,6 +928,7 @@ def proc_portal_comparison():
             price_lookup = {}   # (barang, vendor) -> harga numeric, buat highlight
             recommended_vendor_per_item = {}  # barang -> nama vendor terbaik
             recommended_total = 0
+            worst_case_total = 0  # kalau PIC apes milih vendor termahal di tiap item, buat baseline saving
 
             for idx, r in pivot_items.iterrows():
                 rows_for_item = df_m[df_m["Barang"] == r["Barang"]].copy()
@@ -924,6 +941,8 @@ def proc_portal_comparison():
                 if best_row is not None:
                     recommended_vendor_per_item[r["Barang"]] = best_row["vendor"]
                     recommended_total += float(best_row["unit_price"]) * float(r["Qty"] or 0)
+                if not rows_for_item.empty:
+                    worst_case_total += float(rows_for_item["unit_price"].max()) * float(r["Qty"] or 0)
 
                 for v in vendor_list_sorted:
                     match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == v)]
@@ -979,7 +998,11 @@ def proc_portal_comparison():
                     "UOM": st.column_config.TextColumn("UOM", width="small"),
                 },
             )
-            st.info(f"💰 **Estimasi total belanja kalau ikuti rekomendasi di atas: Rp {recommended_total:,.0f}**".replace(",", "."))
+            cost_saving = worst_case_total - recommended_total
+            saving_pct = (cost_saving / worst_case_total * 100) if worst_case_total > 0 else 0
+            c_save1, c_save2 = st.columns(2)
+            c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari skenario termahal")
+            c_save2.metric("🎯 Total Estimasi (sesuai rekomendasi)", f"Rp {recommended_total:,.0f}".replace(",", "."))
 
             # Export Excel (pakai versi tanpa styling biar rapi dibuka di Excel)
             output = io.BytesIO()
@@ -1009,7 +1032,11 @@ def proc_portal_comparison():
                     st.error(f"Gagal mengarsip RFQ: {e}")
 
             st.divider()
-            render_ai_insight(display_df, rfq_title_active)
+            render_ai_insight(
+                display_df, rfq_title_active,
+                weights={"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime},
+                cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
+            )
 
     # HALAMAN LIST DAFTAR RFQ
     else:
