@@ -3,3 +3,4 @@ pandas
 supabase==2.9.1
 openpyxl
 google-generativeai
+reportlab
