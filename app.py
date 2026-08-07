@@ -485,7 +485,7 @@ Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta
 """
         with st.spinner("⚡ AI sedang menganalisis..."):
             try:
-                model = genai.GenerativeModel("gemini-1.5-flash")
+                model = genai.GenerativeModel("gemini-2.5-flash")
                 res = model.generate_content(prompt)
                 if res and res.text:
                     st.session_state[insight_key] = res.text
@@ -517,7 +517,7 @@ Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta
                 try:
                     context_table = df_display.to_csv(index=False)
                     full_query = f"Data CQR:\n{context_table}\n\nPertanyaan User: {user_prompt}"
-                    model = genai.GenerativeModel("gemini-1.5-flash")
+                    model = genai.GenerativeModel("gemini-2.5-flash")
                     response = model.generate_content(full_query)
                     answer = response.text if response else "Maaf, AI tidak dapat merespons."
                     st.markdown(answer)
