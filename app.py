@@ -447,7 +447,7 @@ def render_ai_insight(df_display, rfq_title):
     genai.configure(api_key=api_key)
 
     st.markdown("---")
-    st.markdown("### 🤖 Executive AI Procurement Insight & Assistant")
+    st.markdown("### 🤖 AI Procurement Assistant")
     
     insight_key = f"ai_insight_{rfq_title}"
     history_key = f"ai_history_{rfq_title}"
@@ -470,7 +470,7 @@ Tugasmu adalah memberikan analisis otomatis tanpa perlu ditanya.
 SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADING & BULLET POINT KONSISTEN):
 
 ### ❓Penjelasan Produk:
-(Berikan penjelasan SINGKAT dan PENTING mengenai spesifikasi dan merk produk, tipe, atau jenisnya, dan kegunaannya)
+(Berikan penjelasan SINGKAT dan PENTING mengenai spesifikasi dan merk produk, tipe, atau jenisnya, dan kegunaannya. misalkan ada beberapa barang yang sama tapi beda jenis atau spec, jelaskan bedanya apa)
 
 ### 💡 Rekomendasi Merk Alternative:
 (Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya, atau rekomendasi vendor sesuai lokasi)
@@ -483,7 +483,7 @@ SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADI
 
 Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
 """
-        with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
+        with st.spinner("⚡ AI sedang menganalisis..."):
             try:
                 model = genai.GenerativeModel("gemini-1.5-flash")
                 res = model.generate_content(prompt)
