@@ -349,6 +349,30 @@ def get_pr_attachments(pr_id):
     return res.data
 
 
+def upload_vendor_document(pr_id, vendor_id, file):
+    try:
+        file_bytes = file.getvalue()
+        path = f"{pr_id}/vendor_docs/{vendor_id}/{file.name}"
+        sb.storage.from_(BUCKET_NAME).upload(
+            path, file_bytes, {"content-type": file.type or "application/pdf", "upsert": "true"}
+        )
+        sb.table("vendor_quote_documents").insert(
+            {"pr_id": pr_id, "vendor_id": vendor_id, "file_name": file.name, "file_path": path}
+        ).execute()
+        return True
+    except Exception as e:
+        st.warning(f"Gagal upload dokumen: {e}")
+        return False
+
+
+def get_vendor_documents(pr_id, vendor_id=None):
+    q = sb.table("vendor_quote_documents").select("*").eq("pr_id", pr_id)
+    if vendor_id:
+        q = q.eq("vendor_id", vendor_id)
+    res = q.execute()
+    return res.data
+
+
 def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock):
     # Cek apakah sudah ada quote sebelumnya untuk assignment ini
     existing = sb.table("quotes").select("id").eq("assignment_id", assignment_id).eq("vendor_id", vendor_id).execute()
@@ -447,7 +471,7 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
     genai.configure(api_key=api_key)
 
     st.markdown("---")
-    st.markdown("### 🤖 AI Procurement Assistant")
+    st.markdown("### 🤖 Executive AI Procurement Insight & Assistant")
     
     insight_key = f"ai_insight_{rfq_title}"
     history_key = f"ai_history_{rfq_title}"
@@ -561,7 +585,42 @@ def _strip_emoji_for_pdf(text):
     return emoji_pattern.sub("", str(text)).strip()
 
 
-def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_saving, saving_pct, recommended_total, ai_insight_text):
+def build_vendor_summary(df_m, vendor_list):
+    """Ringkasan per vendor: Brand, Ready Stock, Lead Time, Warranty, Payment Term (TOP)."""
+    rows = {"Brand": [], "Ready Stock": [], "Lead Time (Hari)": [], "Warranty": [], "Payment Term (TOP)": []}
+    for v in vendor_list:
+        sub = df_m[df_m["vendor"] == v]
+
+        brands = sorted(set(str(b).strip() for b in sub["brand"] if str(b).strip() and str(b).strip() != "-"))
+        rows["Brand"].append(", ".join(brands) if brands else "-")
+
+        stocks = set(str(s).strip() for s in sub["ready_stock"])
+        if stocks == {"Ya"}:
+            stock_val = "Ready Stock (Semua Item)"
+        elif "Ya" in stocks:
+            stock_val = "Sebagian Ready"
+        else:
+            stock_val = "Tidak Ready"
+        rows["Ready Stock"].append(stock_val)
+
+        lts = [lt for lt in sub["lead_time"] if lt]
+        if lts:
+            rows["Lead Time (Hari)"].append(f"{min(lts)}-{max(lts)} hari" if min(lts) != max(lts) else f"{lts[0]} hari")
+        else:
+            rows["Lead Time (Hari)"].append("-")
+
+        warranties = sorted(set(str(w).strip() for w in sub["warranty"] if str(w).strip() and str(w).strip() != "-"))
+        rows["Warranty"].append(", ".join(warranties) if warranties else "-")
+
+        top = sub["top_days"].iloc[0] if not sub.empty else 0
+        rows["Payment Term (TOP)"].append(f"{int(top)} hari" if top else "-")
+
+    summary = pd.DataFrame(rows, index=vendor_list).T.reset_index()
+    summary = summary.rename(columns={"index": "Kriteria"})
+    return summary
+
+
+def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_saving, saving_pct, recommended_total, ai_insight_text, summary_df=None):
     try:
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib import colors
@@ -627,6 +686,25 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     ]))
     elements.append(tbl)
     elements.append(Spacer(1, 14))
+
+    if summary_df is not None and not summary_df.empty:
+        elements.append(Paragraph("Ringkasan Spesifikasi per Vendor", h2_style))
+        sum_rows = [list(summary_df.columns)] + [[str(v) for v in row] for row in summary_df.values]
+        sum_wrapped = []
+        for ri, row in enumerate(sum_rows):
+            style = header_cell_style if ri == 0 else body_cell_style
+            sum_wrapped.append([Paragraph(_strip_emoji_for_pdf(val), style) for val in row])
+        sum_n_cols = len(summary_df.columns)
+        sum_col_widths = [avail_width / sum_n_cols] * sum_n_cols
+        sum_tbl = Table(sum_wrapped, colWidths=sum_col_widths, repeatRows=1)
+        sum_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ]))
+        elements.append(sum_tbl)
+        elements.append(Spacer(1, 14))
 
     if ai_insight_text:
         elements.append(Paragraph("AI Procurement Insight", h2_style))
@@ -956,7 +1034,7 @@ def proc_portal_comparison():
         st.subheader("📋 Matrix Perbandingan Penawaran Vendor")
 
         # POIN 8: Filter Prioritas Pemilihan Vendor
-        st.markdown("##### 🎯 Prioritas Kriteria Pemilihan Vendor:")
+        st.markdown("##### 🎯 Prioritas Pengurutan Penawaran:")
         sort_priority = st.radio(
             "Urutkan & Prioritaskan Berdasarkan:",
             ["Harga Termurah (Lowest Price)", "Lead Time Tercepat", "Ready Stock Utama", "Kombinasi Bobot Skor (Default)"],
@@ -988,6 +1066,7 @@ def proc_portal_comparison():
         raw_q = sb.table("quotes").select("*, rfq_assignments(*, pr_items(*), profiles(*))").execute()
         data_matrix = []
         vendors_in_pr = set()
+        vendor_id_to_name = {}
         
         for q in raw_q.data or []:
             ass = q.get("rfq_assignments") or {}
@@ -997,6 +1076,8 @@ def proc_portal_comparison():
                 v_profile = ass.get("profiles") or {}
                 v_name = v_profile.get("vendor_name", "Unknown")
                 vendors_in_pr.add(v_name)
+                if v_profile.get("id"):
+                    vendor_id_to_name[v_profile["id"]] = v_name
                 
                 # Concat Description 1 + Description 2
                 d1 = str(item.get("description") or "").strip()
@@ -1015,6 +1096,7 @@ def proc_portal_comparison():
                     "brand": q.get("brand", "-"),
                     "lead_time": q.get("lead_time_days", 0),
                     "ready_stock": q.get("ready_stock", "-"),
+                    "warranty": q.get("warranty", "-"),
                     "top_days": v_profile.get("top_days") or 0,
                 })
         
@@ -1103,16 +1185,36 @@ def proc_portal_comparison():
             cost_saving = worst_case_total - recommended_total
             saving_pct = (cost_saving / worst_case_total * 100) if worst_case_total > 0 else 0
             c_save1, c_save2 = st.columns(2)
-            c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari Highest Quote")
-            c_save2.metric("🎯 Total PO Amount (sesuai rekomendasi)", f"Rp {recommended_total:,.0f}".replace(",", "."))
+            c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari skenario termahal")
+            c_save2.metric("🎯 Total Estimasi (sesuai rekomendasi)", f"Rp {recommended_total:,.0f}".replace(",", "."))
+
+            st.markdown("##### 📌 Ringkasan Spesifikasi per Vendor")
+            summary_df = build_vendor_summary(df_m, vendor_list_sorted)
+            st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
+            # Dokumen resmi yang diupload vendor (kalau ada)
+            all_docs = get_vendor_documents(active_id)
+            if all_docs:
+                st.markdown("##### 📎 Dokumen RFQ Resmi dari Vendor")
+                for d in all_docs:
+                    owner_name = vendor_id_to_name.get(d.get("vendor_id"), "Vendor")
+                    st.caption(f"📄 [{owner_name}] {d['file_name']}")
 
             weights_dict = {"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime}
 
-                        # PDF Download -- ditaruh SETELAH AI insight biar analisisnya ikut kecapture di PDF
+            st.divider()
+            render_ai_insight(
+                display_df, rfq_title_active,
+                weights=weights_dict,
+                cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
+            )
+
+            # PDF Download -- ditaruh SETELAH AI insight biar analisisnya ikut kecapture di PDF
             ai_insight_text = st.session_state.get(f"ai_insight_{rfq_title_active}", "")
             pdf_bytes = generate_cqr_pdf(
                 rfq_title_active, pr_info["pr_code"], loc_active, weights_dict,
                 display_df, cost_saving, saving_pct, recommended_total, ai_insight_text,
+                summary_df=summary_df,
             )
             st.write(" ")
             if pdf_bytes:
@@ -1140,15 +1242,6 @@ def proc_portal_comparison():
                         st.rerun()
                 except Exception as e:
                     st.error(f"Gagal mengarsip RFQ: {e}")
-
-            st.divider()
-            render_ai_insight(
-                display_df, rfq_title_active,
-                weights=weights_dict,
-                cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
-            )
-
-
 
     # HALAMAN LIST DAFTAR RFQ
     else:
@@ -1505,10 +1598,22 @@ def vendor_portal(vendor_id):
                     "Brand": last_quote.get("brand", "-"),
                     "Ready Stock": last_quote.get("ready_stock", "Ya"),
                     "Lead Time (Hari)": last_quote.get("lead_time_days", 7),
+                    "Warranty": last_quote.get("warranty", "-"),
                 })
             
             df_preview = pd.DataFrame(table_rows)
-            
+
+            # Download daftar barang (Excel) -- buat vendor kerja offline kalau perlu
+            excel_buf = io.BytesIO()
+            with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+                df_preview.drop(columns=["assignment_id"]).to_excel(writer, index=False, sheet_name="Daftar Barang")
+            st.download_button(
+                "📥 Download Daftar Barang (Excel)",
+                excel_buf.getvalue(),
+                f"Daftar_Barang_{group['title']}.xlsx",
+                use_container_width=True,
+            )
+
             st.markdown("##### ✏️ Masukkan Harga & Detail Penawaran:")
             
             # 3. Data Editor Vendor dengan Column Configuration & Word-Wrap
@@ -1517,12 +1622,12 @@ def vendor_portal(vendor_id):
                 key=f"editor_v_{active_rfq_id}",
                 hide_index=True,
                 use_container_width=True,
-                row_height=60,
+                row_height=80,
                 disabled=["Barang", "Qty", "UOM"], # Barang, Qty, UOM dikunci
                 column_config={
                     "Barang": st.column_config.TextColumn(
                         "Barang",
-                        width="medium", # Lebar sedang & Word-wrap otomatis
+                        width=280,  # Lebar fix (px) supaya word-wrap kepakai konsisten
                         help="Nama Barang & Deskripsi Utama"
                     ),
                     "Spesifikasi Vendor": st.column_config.TextColumn(
@@ -1540,9 +1645,20 @@ def vendor_portal(vendor_id):
                     ),
                     "Ready Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=True),
                     "Lead Time (Hari)": st.column_config.NumberColumn("Lead Time (Hari)", min_value=1, step=1),
+                    "Warranty": st.column_config.TextColumn("Warranty", width="small", help="Contoh: 1 Tahun, 6 Bulan, atau '-' kalau tidak ada"),
                 },
             )
-            
+
+            st.markdown("##### 📎 Upload RFQ Resmi / Surat Penawaran (opsional)")
+            st.caption("Bisa lampirkan dokumen penawaran resmi berkop surat perusahaan (PDF), buat pelengkap data yang diisi di atas.")
+            official_doc = st.file_uploader("Pilih file PDF", type=["pdf"], key=f"official_doc_{active_rfq_id}")
+
+            existing_docs = get_vendor_documents(active_rfq_id, vendor_id)
+            if existing_docs:
+                st.write("**Dokumen yang sudah diupload:**")
+                for d in existing_docs:
+                    st.caption(f"📄 {d['file_name']} — {d['uploaded_at'][:10]}")
+
             if st.button("🚀 Kirim Penawaran Now", type="primary", use_container_width=True):
                 for idx, r in edited.iterrows():
                     ass_id = df_preview.iloc[idx]["assignment_id"]
@@ -1554,9 +1670,13 @@ def vendor_portal(vendor_id):
                         "brand": r["Brand"],
                         "lead_time_days": r["Lead Time (Hari)"],
                         "ready_stock": r["Ready Stock"],
-                        "spec_vendor": r["Spesifikasi Vendor"]
+                        "spec_vendor": r["Spesifikasi Vendor"],
+                        "warranty": r["Warranty"],
                     }).execute()
-                    
+
+                if official_doc is not None:
+                    upload_vendor_document(active_rfq_id, vendor_id, official_doc)
+
                 st.success(f"🎉 Penawaran berhasil dikirim!")
                 st.session_state["active_vendor_rfq_id"] = None
                 st.rerun()
