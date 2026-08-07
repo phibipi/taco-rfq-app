@@ -447,7 +447,7 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
     genai.configure(api_key=api_key)
 
     st.markdown("---")
-    st.markdown("### 🤖 Executive AI Procurement Insight & Assistant")
+    st.markdown("### 🤖 AI Procurement Assistant")
     
     insight_key = f"ai_insight_{rfq_title}"
     history_key = f"ai_history_{rfq_title}"
@@ -956,7 +956,7 @@ def proc_portal_comparison():
         st.subheader("📋 Matrix Perbandingan Penawaran Vendor")
 
         # POIN 8: Filter Prioritas Pemilihan Vendor
-        st.markdown("##### 🎯 Prioritas Pengurutan Penawaran:")
+        st.markdown("##### 🎯 Prioritas Kriteria Pemilihan Vendor:")
         sort_priority = st.radio(
             "Urutkan & Prioritaskan Berdasarkan:",
             ["Harga Termurah (Lowest Price)", "Lead Time Tercepat", "Ready Stock Utama", "Kombinasi Bobot Skor (Default)"],
@@ -1103,8 +1103,8 @@ def proc_portal_comparison():
             cost_saving = worst_case_total - recommended_total
             saving_pct = (cost_saving / worst_case_total * 100) if worst_case_total > 0 else 0
             c_save1, c_save2 = st.columns(2)
-            c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari skenario termahal")
-            c_save2.metric("🎯 Total Estimasi (sesuai rekomendasi)", f"Rp {recommended_total:,.0f}".replace(",", "."))
+            c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari Highest Quote")
+            c_save2.metric("🎯 Total PO Amount (sesuai rekomendasi)", f"Rp {recommended_total:,.0f}".replace(",", "."))
 
             weights_dict = {"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime}
 
