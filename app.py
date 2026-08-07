@@ -496,6 +496,9 @@ Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta
     if insight_key in st.session_state:
         with st.container(border=True):
             st.markdown(st.session_state[insight_key])
+        if st.button("🔄 Regenerate Analisis", key=f"regen_{rfq_title}"):
+            del st.session_state[insight_key]
+            st.rerun()
 
     # 2. PROMPT BAR CHAT MANUAL (USER BISA NANYA TAMBAHAN)
     st.markdown("##### 💬 Tanya AI seputar penawaran ini:")
