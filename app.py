@@ -991,7 +991,7 @@ def proc_portal_comparison():
                 display_df.style.apply(highlight_recommended_cells, axis=1),
                 hide_index=True,
                 use_container_width=True,
-                row_height=55,
+                row_height=80,
                 column_config={
                     "Barang": st.column_config.TextColumn("Barang", width="large"),
                     "Qty": st.column_config.TextColumn("Qty", width="small"),
