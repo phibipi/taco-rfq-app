@@ -373,29 +373,30 @@ def get_vendor_documents(pr_id, vendor_id=None):
     return res.data
 
 
-def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock):
-    # Cek apakah sudah ada quote sebelumnya untuk assignment ini
-    existing = sb.table("quotes").select("id").eq("assignment_id", assignment_id).eq("vendor_id", vendor_id).execute()
-    
-    if existing.data:
-        # Update data penawaran yang sudah ada
-        quote_id = existing.data[0]["id"]
-        sb.table("quotes").update({
+def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-"):
+    try:
+        # Cek apakah sudah ada quote sebelumnya untuk assignment ini
+        existing = sb.table("quotes").select("id").eq("assignment_id", assignment_id).eq("vendor_id", vendor_id).execute()
+
+        payload = {
             "unit_price": unit_price,
             "brand": brand,
             "lead_time_days": lead_time_days,
             "ready_stock": ready_stock,
-        }).eq("id", quote_id).execute()
-    else:
-        # Insert penawaran baru jika belum pernah isi
-        sb.table("quotes").insert({
-            "assignment_id": assignment_id,
-            "vendor_id": vendor_id,
-            "unit_price": unit_price,
-            "brand": brand,
-            "lead_time_days": lead_time_days,
-            "ready_stock": ready_stock,
-        }).execute()
+            "warranty": warranty,
+            "spec_vendor": spec_vendor,
+        }
+
+        if existing.data:
+            quote_id = existing.data[0]["id"]
+            sb.table("quotes").update(payload).eq("id", quote_id).execute()
+        else:
+            payload["assignment_id"] = assignment_id
+            payload["vendor_id"] = vendor_id
+            sb.table("quotes").insert(payload).execute()
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 # =====================================================================
@@ -1661,26 +1662,24 @@ def vendor_portal(vendor_id):
                     st.caption(f"📄 {d['file_name']} — {d['uploaded_at'][:10]}")
 
             if st.button("🚀 Kirim Penawaran", type="primary", use_container_width=True):
+                all_ok = True
                 for idx, r in edited.iterrows():
                     ass_id = df_preview.iloc[idx]["assignment_id"]
-                    # Update submit quote dengan menyertakan spesifikasi vendor
-                    sb.table("quotes").upsert({
-                        "assignment_id": ass_id,
-                        "vendor_id": vendor_id,
-                        "unit_price": r["Unit Price (IDR)"],
-                        "brand": r["Brand"],
-                        "lead_time_days": r["Lead Time (Hari)"],
-                        "ready_stock": r["Ready Stock"],
-                        "spec_vendor": r["Spesifikasi Vendor"],
-                        "warranty": r["Warranty"],
-                    }).execute()
+                    ok, err = submit_quote(
+                        ass_id, vendor_id,
+                        r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
+                        r["Ready Stock"], r["Warranty"], r["Spesifikasi Vendor"],
+                    )
+                    if not ok:
+                        all_ok = False
+                        st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
 
-                if official_doc is not None:
-                    upload_vendor_document(active_rfq_id, vendor_id, official_doc)
-
-                st.success(f"🎉 Penawaran berhasil dikirim!")
-                st.session_state["active_vendor_rfq_id"] = None
-                st.rerun()
+                if all_ok:
+                    if official_doc is not None:
+                        upload_vendor_document(active_rfq_id, vendor_id, official_doc)
+                    st.success(f"🎉 Penawaran berhasil dikirim!")
+                    st.session_state["active_vendor_rfq_id"] = None
+                    st.rerun()
 
         # TAMPILAN CARD LIST RFQ
         else:
