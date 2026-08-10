@@ -1615,7 +1615,7 @@ def vendor_portal(vendor_id):
             )
 
             
-            st.caption("Text dapat di copy-paste dari excel (khusus nominal mohon copy tanpa format")
+            st.caption("Text dapat di copy-paste dari excel (khusus angka mohon copy tanpa format)")
             
             # 3. Data Editor Vendor dengan Column Configuration & Word-Wrap
             edited = st.data_editor(
