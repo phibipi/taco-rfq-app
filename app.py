@@ -1567,7 +1567,7 @@ def vendor_portal(vendor_id):
             # INFO PIC DITAMBAHKAN DISINI
             st.caption(f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} | **No. PR:** {group['pr_code']}")
             st.divider()
-
+            st.markdown("##### ✏️ Masukkan Harga & Detail Penawaran:")
             # Attachment File
             attachments = get_pr_attachments(active_rfq_id)
             if attachments:
@@ -1614,7 +1614,8 @@ def vendor_portal(vendor_id):
                 use_container_width=True,
             )
 
-            st.markdown("##### ✏️ Masukkan Harga & Detail Penawaran:")
+            
+            st.caption("Text dapat di copy-paste dari excel (khusus nominal mohon copy tanpa format")
             
             # 3. Data Editor Vendor dengan Column Configuration & Word-Wrap
             edited = st.data_editor(
@@ -1649,8 +1650,8 @@ def vendor_portal(vendor_id):
                 },
             )
 
-            st.markdown("##### 📎 Upload RFQ Resmi / Surat Penawaran (opsional)")
-            st.caption("Bisa lampirkan dokumen penawaran resmi berkop surat perusahaan (PDF), buat pelengkap data yang diisi di atas.")
+            st.markdown("##### 📎 Upload RFQ Resmi / Surat Penawaran")
+            st.caption("Mohon dapat melampirkan RFQ resmi dengan kop surat atau cap perusahaan dan tandatangan.")
             official_doc = st.file_uploader("Pilih file PDF", type=["pdf"], key=f"official_doc_{active_rfq_id}")
 
             existing_docs = get_vendor_documents(active_rfq_id, vendor_id)
@@ -1659,7 +1660,7 @@ def vendor_portal(vendor_id):
                 for d in existing_docs:
                     st.caption(f"📄 {d['file_name']} — {d['uploaded_at'][:10]}")
 
-            if st.button("🚀 Kirim Penawaran Now", type="primary", use_container_width=True):
+            if st.button("🚀 Kirim Penawaran", type="primary", use_container_width=True):
                 for idx, r in edited.iterrows():
                     ass_id = df_preview.iloc[idx]["assignment_id"]
                     # Update submit quote dengan menyertakan spesifikasi vendor
