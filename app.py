@@ -180,28 +180,6 @@ def get_already_published_keys():
     return keys
 
 
-def mark_pic_viewed(pr_id):
-    """Tandai RFQ sudah dibuka oleh PIC (sekali saja, kalau masih null)."""
-    try:
-        sb.table("purchase_requests").update(
-            {"pic_viewed_at": datetime.now().isoformat()}
-        ).eq("id", pr_id).is_("pic_viewed_at", "null").execute()
-    except Exception:
-        pass
-
-
-def mark_vendor_viewed(assignment_ids):
-    """Tandai assignment-assignment RFQ sudah dibuka vendor (sekali saja, kalau masih null)."""
-    if not assignment_ids:
-        return
-    try:
-        sb.table("rfq_assignments").update(
-            {"vendor_viewed_at": datetime.now().isoformat()}
-        ).in_("id", assignment_ids).is_("vendor_viewed_at", "null").execute()
-    except Exception:
-        pass
-
-
 # =====================================================================
 # PUBLISH RFQ
 # =====================================================================
@@ -1040,16 +1018,15 @@ def proc_portal_import():
 def proc_portal_comparison():
     try:
         res_pr = sb.table("purchase_requests").select(
-            "id, pr_code, location, priority_status, rfq_title, uploaded_at, pic_viewed_at"
+            "id, pr_code, location, priority_status, rfq_title, uploaded_at"
         ).execute()
         df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
     except Exception:
-        # Fallback: kolom pic_viewed_at/uploaded_at belum ada di DB (migration belum jalan).
-        # App tetap jalan, cuma badge "Baru/Sudah Dibuka" & sort-by-newest gak aktif dulu.
+        # Fallback: kolom uploaded_at belum ada di DB.
+        # App tetap jalan, cuma sort-by-newest gak aktif dulu.
         st.warning(
-            "⚠️ Kolom `pic_viewed_at`/`uploaded_at` belum ada di tabel `purchase_requests`. "
-            "Jalankan SQL migration di Supabase (lihat instruksi sebelumnya) supaya sorting "
-            "terbaru & badge 'Baru/Sudah Dibuka' aktif. Untuk sekarang, list ditampilkan tanpa fitur itu."
+            "⚠️ Kolom `uploaded_at` belum ada di tabel `purchase_requests`. "
+            "List tetap ditampilkan, cuma belum terurut berdasarkan yang terbaru."
         )
         res_pr = sb.table("purchase_requests").select(
             "id, pr_code, location, priority_status, rfq_title"
@@ -1057,7 +1034,6 @@ def proc_portal_comparison():
         df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
         if not df_pr.empty:
             df_pr["uploaded_at"] = None
-            df_pr["pic_viewed_at"] = None
 
     active_id = st.session_state.get("active_compare_pr_id")
 
@@ -1393,9 +1369,15 @@ def proc_portal_comparison():
                     continue
                 shown_count += 1
 
-                # Badge status: Baru (belum pernah dibuka PIC) / Sudah Dibuka
-                is_new = pd.isna(pr_row.get("pic_viewed_at")) or not pr_row.get("pic_viewed_at")
-                status_badge = "🆕 Baru" if is_new else "👀 Sudah Dibuka"
+                # Badge status submit: Submit Sebagian / Sudah Submit (kalau belum ada yang submit, gak ada badge)
+                total_ass = len(assignments_this_pr)
+                submitted_ass_count = sum(1 for a in assignments_this_pr if a["id"] in submitted_ass_ids)
+                if total_ass == 0 or submitted_ass_count == 0:
+                    status_badge = ""
+                elif submitted_ass_count < total_ass:
+                    status_badge = " | 🔶 Submit Sebagian"
+                else:
+                    status_badge = " | ✅ Sudah Submit"
 
                 with st.container(border=True):
                     c_info, c_btn = st.columns([4, 1])
@@ -1403,7 +1385,7 @@ def proc_portal_comparison():
                     with c_info:
                         st.subheader(f"📋 {title}")
                         st.caption(
-                            f"📍 **Lokasi:** {loc} | **Priority:** {tag_prio} | **PR Code:** {pr_row['pr_code']} | {status_badge}"
+                            f"📍 **Lokasi:** {loc} | **Priority:** {tag_prio} | **PR Code:** {pr_row['pr_code']}{status_badge}"
                         )
 
                         if assignments_this_pr:
@@ -1419,7 +1401,6 @@ def proc_portal_comparison():
                     with c_btn:
                         st.write(" ")
                         if st.button("🔍 Buka Detail", key=f"open_detail_{pr_id}", type="primary", use_container_width=True):
-                            mark_pic_viewed(pr_id)
                             st.session_state["active_compare_pr_id"] = pr_id
                             st.rerun()
 
@@ -1848,19 +1829,16 @@ def vendor_portal(vendor_id):
                     continue
                 shown_count += 1
 
-                # Status: Baru (belum dibuka sama sekali) / Dibuka belum submit / Sudah Submit (semua/sebagian)
+                # Status submit: Submit Sebagian / Sudah Submit (kalau belum ada yang submit, gak ada badge)
                 total_rows = len(group["rows"])
-                viewed_rows = sum(1 for a in group["rows"] if a.get("vendor_viewed_at"))
                 submitted_rows = sum(1 for a in group["rows"] if a.get("quotes"))
 
-                if viewed_rows == 0:
-                    status_badge = "🆕 Baru"
-                elif submitted_rows == 0:
-                    status_badge = "👀 Sudah Dibuka (Belum Submit)"
+                if total_rows == 0 or submitted_rows == 0:
+                    status_badge = ""
                 elif submitted_rows < total_rows:
-                    status_badge = "🔶 Submit Sebagian"
+                    status_badge = " | 🔶 Submit Sebagian"
                 else:
-                    status_badge = "✅ Sudah Submit"
+                    status_badge = " | ✅ Sudah Submit"
 
                 with st.container(border=True):
                     c_info, c_btn = st.columns([4, 1])
@@ -1870,13 +1848,12 @@ def vendor_portal(vendor_id):
                         # INFO PIC DITAMBAHKAN PADA CARD LIST
                         st.caption(
                             f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} "
-                            f"| **Priority:** {prio_tag} | **PR Code:** {group['pr_code']} | {status_badge}"
+                            f"| **Priority:** {prio_tag} | **PR Code:** {group['pr_code']}{status_badge}"
                         )
                     
                     with c_btn:
                         st.write(" ")
                         if st.button("🔍 Buka Detail", key=f"v_detail_{pr_id}", type="primary", use_container_width=True):
-                            mark_vendor_viewed([a["id"] for a in group["rows"]])
                             st.session_state["active_vendor_rfq_id"] = pr_id
                             st.rerun()
 
