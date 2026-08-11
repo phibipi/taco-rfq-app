@@ -414,7 +414,10 @@ def upload_vendor_document(pr_id, vendor_id, file):
     except Exception as e:
         st.warning(f"Gagal upload dokumen: {e}")
         return False
-
+        
+@st.cache_data(ttl=600, show_spinner=False)
+def get_storage_file_bytes(file_path):
+    return sb.storage.from_(BUCKET_NAME).download(file_path)
 
 def get_vendor_documents(pr_id, vendor_id=None):
     q = sb.table("vendor_quote_documents").select("*").eq("pr_id", pr_id)
@@ -1542,10 +1545,6 @@ def proc_portal_comparison():
 
             if len(split_data) > 1:
                 st.markdown("##### 📦 Split PO — Rekomendasi Alokasi per Vendor")
-                st.caption(
-                    "Vendor terbaik beda-beda per item sesuai bobot di atas, jadi PO bisa displit "
-                    f"ke **{len(split_data)} vendor** berikut supaya tetap dapat kombinasi termurah/terbaik."
-                )
                 split_tabs = st.tabs([f"📦 {v} ({len(items)} item)" for v, items in split_data.items()])
                 for tab, (v_name, items) in zip(split_tabs, split_data.items()):
                     with tab:
@@ -1570,13 +1569,25 @@ def proc_portal_comparison():
             elif len(split_data) == 1:
                 st.caption("💡 Semua item direkomendasikan dari vendor yang sama — tidak perlu split PO.")
 
-            # Dokumen resmi yang diupload vendor (kalau ada)
             all_docs = get_vendor_documents(active_id)
             if all_docs:
                 st.markdown("##### 📎 Dokumen RFQ Resmi dari Vendor")
                 for d in all_docs:
                     owner_name = vendor_id_to_name.get(d.get("vendor_id"), "Vendor")
-                    st.caption(f"📄 [{owner_name}] {d['file_name']}")
+                    c_doc1, c_doc2 = st.columns([4, 1])
+                    c_doc1.caption(f"📄 [{owner_name}] {d['file_name']}")
+                    try:
+                        file_bytes = get_storage_file_bytes(d["file_path"])
+                        c_doc2.download_button(
+                            "⬇️ Download",
+                            file_bytes,
+                            file_name=d["file_name"],
+                            mime="application/pdf",
+                            key=f"dl_doc_{d['id']}",
+                            use_container_width=True,
+                        )
+                    except Exception:
+                        c_doc2.caption("⚠️ Gagal load")
 
             weights_dict = {"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime}
 
@@ -2289,7 +2300,7 @@ def vendor_portal(vendor_id):
         st.header("🔍 History Penawaran Saya")
         res_hist = (
             sb.table("quotes")
-            .select("unit_price, brand, ready_stock, lead_time_days, created_at, round, rfq_assignments(status, pr_items(id, description, description2, quantity, uom, awarded_vendor_id, purchase_requests(rfq_title, pr_code, profiles(vendor_name)))))")
+            .select("unit_price, brand, ready_stock, lead_time_days, created_at, round, rfq_assignments(status, pr_items(id, description, description2, quantity, uom, awarded_vendor_id, purchase_requests(rfq_title, pr_code, profiles(vendor_name))))")
             .eq("vendor_id", vendor_id)
             .execute()
         )
