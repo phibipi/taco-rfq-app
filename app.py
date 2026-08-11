@@ -1,6 +1,7 @@
 import io
 import random
 import string
+import secrets as pysecrets
 from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
@@ -50,6 +51,56 @@ def login(email, password):
         return prof.data
     except Exception:
         return None
+
+
+# =====================================================================
+# SESSION PERSISTENCE (biar gak logout kalau tab diem lama / reconnect)
+# =====================================================================
+SESSION_DAYS_VALID = 7
+
+
+def create_session(user_id):
+    """Bikin token login baru & simpan ke DB. Return token string, atau None kalau gagal."""
+    token = pysecrets.token_urlsafe(32)
+    expires = (datetime.now() + timedelta(days=SESSION_DAYS_VALID)).isoformat()
+    try:
+        sb.table("user_sessions").insert(
+            {"user_id": user_id, "token": token, "expires_at": expires}
+        ).execute()
+        return token
+    except Exception:
+        return None
+
+
+def get_session_user(token):
+    """Validasi token dari URL & kembalikan profile user kalau masih berlaku."""
+    if not token:
+        return None
+    try:
+        res = sb.table("user_sessions").select("*, profiles(*)").eq("token", token).execute()
+        if not res.data:
+            return None
+        sess = res.data[0]
+        exp = sess.get("expires_at")
+        if exp:
+            try:
+                exp_dt = datetime.fromisoformat(str(exp).replace("Z", "+00:00")).replace(tzinfo=None)
+                if exp_dt < datetime.now():
+                    return None
+            except Exception:
+                pass
+        return sess.get("profiles")
+    except Exception:
+        return None
+
+
+def delete_session(token):
+    if not token:
+        return
+    try:
+        sb.table("user_sessions").delete().eq("token", token).execute()
+    except Exception:
+        pass
 
 
 def register_user(name, email, password, role):
@@ -373,10 +424,17 @@ def get_vendor_documents(pr_id, vendor_id=None):
     return res.data
 
 
-def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-"):
+def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-", round_num=1):
     try:
-        # Cek apakah sudah ada quote sebelumnya untuk assignment ini
-        existing = sb.table("quotes").select("id").eq("assignment_id", assignment_id).eq("vendor_id", vendor_id).execute()
+        # Cek apakah sudah ada quote di ROUND yang sama untuk assignment ini
+        existing = (
+            sb.table("quotes")
+            .select("id")
+            .eq("assignment_id", assignment_id)
+            .eq("vendor_id", vendor_id)
+            .eq("round", round_num)
+            .execute()
+        )
 
         payload = {
             "unit_price": unit_price,
@@ -385,6 +443,7 @@ def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, re
             "ready_stock": ready_stock,
             "warranty": warranty,
             "spec_vendor": spec_vendor,
+            "round": round_num,
         }
 
         if existing.data:
@@ -397,6 +456,60 @@ def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, re
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+def request_nego(pr_id, vendor_ids, note=""):
+    """Naikkan current_round assignment vendor terpilih untuk RFQ ini & kirim email minta final quotation."""
+    try:
+        res_ass = (
+            sb.table("rfq_assignments")
+            .select("id, vendor_id, current_round, profiles(vendor_name, email), pr_items!inner(pr_id, description, description2)")
+            .eq("pr_items.pr_id", pr_id)
+            .in_("vendor_id", vendor_ids)
+            .execute()
+        )
+        if not res_ass.data:
+            return 0
+
+        by_vendor = {}
+        for ass in res_ass.data:
+            by_vendor.setdefault(ass["vendor_id"], []).append(ass)
+
+        notified = 0
+        for v_id, rows in by_vendor.items():
+            new_round = max((r.get("current_round") or 1) for r in rows) + 1
+            ids = [r["id"] for r in rows]
+            sb.table("rfq_assignments").update({"current_round": new_round}).in_("id", ids).execute()
+
+            v_profile = rows[0].get("profiles") or {}
+            v_email = v_profile.get("email")
+            v_name = v_profile.get("vendor_name", "Vendor")
+            if v_email and "email_config" in st.secrets:
+                try:
+                    subject = f"🤝 Permintaan Final Quotation (Nego) - {v_name}"
+                    body = (
+                        f"Dear {v_name},\n\n"
+                        f"Mohon dapat mengirimkan Final Quotation (harga terbaik) untuk RFQ terkait.\n"
+                        f"{('Catatan dari PIC: ' + note) if note else ''}\n\n"
+                        f"Silakan login ke portal dan submit ulang penawaran Anda: https://taco-rfq.streamlit.app/\n\n"
+                        f"Salam,\nTACO Procurement Team"
+                    )
+                    msg = MIMEMultipart()
+                    msg["From"] = st.secrets["email_config"].get("smtp_user", "")
+                    msg["To"] = v_email
+                    msg["Subject"] = subject
+                    msg.attach(MIMEText(body, "plain"))
+                    server = smtplib.SMTP("smtp.gmail.com", 587)
+                    server.starttls()
+                    server.login(st.secrets["email_config"].get("smtp_user", ""), st.secrets["email_config"].get("smtp_password", ""))
+                    server.sendmail(st.secrets["email_config"].get("smtp_user", ""), v_email, msg.as_string())
+                    server.quit()
+                    notified += 1
+                except Exception:
+                    pass
+        return notified
+    except Exception:
+        return 0
 
 
 # =====================================================================
@@ -621,7 +734,7 @@ def build_vendor_summary(df_m, vendor_list):
     return summary
 
 
-def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_saving, saving_pct, recommended_total, ai_insight_text, summary_df=None):
+def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_saving, saving_pct, recommended_total, ai_insight_text, summary_df=None, split_data=None):
     try:
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib import colors
@@ -707,6 +820,33 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
         elements.append(sum_tbl)
         elements.append(Spacer(1, 14))
 
+    if split_data:
+        elements.append(Paragraph("Split PO — Alokasi Item per Vendor Pemenang", h2_style))
+        for v_name, items in split_data.items():
+            df_split = pd.DataFrame(items)
+            subtotal = df_split["Total"].sum()
+            elements.append(Paragraph(f"<b>{v_name}</b> — Subtotal: Rp {subtotal:,.0f}".replace(",", "."), normal_style))
+            split_cols = ["Barang", "Qty", "UOM", "Brand", "Unit Price", "Total"]
+            split_rows = [split_cols] + [
+                [str(row["Barang"]), str(row["Qty"]), str(row["UOM"]), str(row["Brand"]),
+                 f"Rp {row['Unit Price']:,.0f}".replace(",", "."), f"Rp {row['Total']:,.0f}".replace(",", ".")]
+                for row in items
+            ]
+            split_wrapped = []
+            for ri, row in enumerate(split_rows):
+                style = header_cell_style if ri == 0 else body_cell_style
+                split_wrapped.append([Paragraph(_strip_emoji_for_pdf(val), style) for val in row])
+            sp_col_widths = [avail_width * 0.30] + [avail_width * 0.70 / 5] * 5
+            sp_tbl = Table(split_wrapped, colWidths=sp_col_widths, repeatRows=1)
+            sp_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+            ]))
+            elements.append(sp_tbl)
+            elements.append(Spacer(1, 10))
+
     if ai_insight_text:
         elements.append(Paragraph("AI Procurement Insight", h2_style))
         for line in ai_insight_text.split("\n"):
@@ -737,6 +877,10 @@ def show_login():
                 profile = login(email_input, password_input)
                 if profile:
                     st.session_state["user_info"] = profile
+                    token = create_session(profile["id"])
+                    if token:
+                        st.session_state["session_token"] = token
+                        st.query_params["token"] = token
                     st.rerun()
                 else:
                     st.error("Email atau Password salah.")
@@ -1084,41 +1228,74 @@ def proc_portal_comparison():
 
         # Query data quotes & assignments untuk CQR Matrix Format
         raw_q = sb.table("quotes").select("*, rfq_assignments(*, pr_items(*), profiles(*))").execute()
-        data_matrix = []
-        vendors_in_pr = set()
-        vendor_id_to_name = {}
-        
+
+        # Ambil quote yang relevan buat RFQ ini dulu, lalu tentukan ROUND TERBARU per assignment
+        # (biar kalau ada nego, yang dipakai buat perbandingan utama = penawaran terakhir/final)
+        relevant_quotes = []
+        max_round_per_assignment = {}
         for q in raw_q.data or []:
             ass = q.get("rfq_assignments") or {}
             item = ass.get("pr_items") or {}
-            
-            if item.get("pr_id") == active_id:
-                v_profile = ass.get("profiles") or {}
-                v_name = v_profile.get("vendor_name", "Unknown")
-                vendors_in_pr.add(v_name)
-                if v_profile.get("id"):
-                    vendor_id_to_name[v_profile["id"]] = v_name
-                
-                # Concat Description 1 + Description 2
-                d1 = str(item.get("description") or "").strip()
-                d2 = str(item.get("description2") or "").strip()
-                full_item_name = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
-                clean_name = clean_description(full_item_name)
-        
-                data_matrix.append({
-                    "Barang": clean_name,
-                    "Spesifikasi Vendor": q.get("spec_vendor", "-"),
-                    "Qty": item.get("quantity", 0),
-                    "UOM": item.get("uom", "-"),
-                    "vendor": v_name,
-                    "price": q.get("unit_price", 0),
-                    "total": q.get("unit_price", 0) * item.get("quantity", 0),
-                    "brand": q.get("brand", "-"),
-                    "lead_time": q.get("lead_time_days", 0),
-                    "ready_stock": q.get("ready_stock", "-"),
-                    "warranty": q.get("warranty", "-"),
-                    "top_days": v_profile.get("top_days") or 0,
-                })
+            if item.get("pr_id") != active_id:
+                continue
+            relevant_quotes.append(q)
+            ass_id = q.get("assignment_id")
+            q_round = q.get("round") or 1
+            if ass_id is not None:
+                max_round_per_assignment[ass_id] = max(max_round_per_assignment.get(ass_id, 1), q_round)
+
+        data_matrix = []
+        first_quote_lookup = {}  # (item_id, vendor) -> harga round pertama, buat perbandingan sebelum/sesudah nego
+        vendors_in_pr = set()
+        vendor_id_to_name = {}
+        any_nego_happened = False
+
+        for q in relevant_quotes:
+            ass = q.get("rfq_assignments") or {}
+            item = ass.get("pr_items") or {}
+            v_profile = ass.get("profiles") or {}
+            v_name = v_profile.get("vendor_name", "Unknown")
+            ass_id = q.get("assignment_id")
+            q_round = q.get("round") or 1
+            item_id = item.get("id")
+
+            # Simpan harga round pertama buat pembanding, apapun round-nya sekarang
+            if q_round == 1:
+                first_quote_lookup[(item_id, v_name)] = q.get("unit_price", 0)
+            if max_round_per_assignment.get(ass_id, 1) > 1:
+                any_nego_happened = True
+
+            # Matrix utama HANYA pakai quote dari round terbaru per assignment
+            if q_round != max_round_per_assignment.get(ass_id, 1):
+                continue
+
+            vendors_in_pr.add(v_name)
+            if v_profile.get("id"):
+                vendor_id_to_name[v_profile["id"]] = v_name
+
+            # Concat Description 1 + Description 2
+            d1 = str(item.get("description") or "").strip()
+            d2 = str(item.get("description2") or "").strip()
+            full_item_name = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
+            clean_name = clean_description(full_item_name)
+
+            data_matrix.append({
+                "item_id": item_id,
+                "Barang": clean_name,
+                "Spesifikasi Vendor": q.get("spec_vendor", "-"),
+                "Qty": item.get("quantity", 0),
+                "UOM": item.get("uom", "-"),
+                "vendor": v_name,
+                "vendor_id": v_profile.get("id"),
+                "price": q.get("unit_price", 0),
+                "total": q.get("unit_price", 0) * item.get("quantity", 0),
+                "brand": q.get("brand", "-"),
+                "lead_time": q.get("lead_time_days", 0),
+                "ready_stock": q.get("ready_stock", "-"),
+                "warranty": q.get("warranty", "-"),
+                "top_days": v_profile.get("top_days") or 0,
+                "round": q_round,
+            })
         
         if not data_matrix:
             st.warning("Belum ada penawaran harga yang masuk dari vendor untuk RFQ ini.")
@@ -1127,7 +1304,7 @@ def proc_portal_comparison():
             vendor_list_sorted = sorted(list(vendors_in_pr))
 
             # Barang unik jadi baris
-            pivot_items = df_m[["Barang", "Qty", "UOM"]].drop_duplicates().reset_index(drop=True)
+            pivot_items = df_m[["item_id", "Barang", "Qty", "UOM"]].drop_duplicates(subset=["Barang"]).reset_index(drop=True)
 
             price_lookup = {}   # (barang, vendor) -> harga numeric, buat highlight
             recommended_vendor_per_item = {}  # barang -> nama vendor terbaik
@@ -1208,6 +1385,31 @@ def proc_portal_comparison():
             c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari skenario termahal")
             c_save2.metric("🎯 Total Estimasi (sesuai rekomendasi)", f"Rp {recommended_total:,.0f}".replace(",", "."))
 
+            # ---------------------------------------------------------
+            # PERBANDINGAN FIRST QUOTE vs FINAL (NEGO) — cuma muncul kalau ada nego
+            # ---------------------------------------------------------
+            if any_nego_happened:
+                st.markdown("##### 🤝 Perbandingan First Quote vs Final (Setelah Nego)")
+                nego_rows = []
+                for _, dm_row in df_m.iterrows():
+                    key = (dm_row["item_id"], dm_row["vendor"])
+                    first_price = first_quote_lookup.get(key)
+                    final_price = dm_row["price"]
+                    if first_price is None or dm_row["round"] <= 1:
+                        continue  # gak ada nego buat baris ini
+                    delta = final_price - first_price
+                    nego_rows.append({
+                        "Barang": dm_row["Barang"],
+                        "Vendor": dm_row["vendor"],
+                        "First Quote": f"Rp {first_price:,.0f}".replace(",", "."),
+                        "Final (Nego)": f"Rp {final_price:,.0f}".replace(",", "."),
+                        "Selisih": f"{'-' if delta < 0 else '+'}Rp {abs(delta):,.0f}".replace(",", "."),
+                    })
+                if nego_rows:
+                    st.dataframe(pd.DataFrame(nego_rows), hide_index=True, use_container_width=True)
+                else:
+                    st.caption("Nego sudah diminta, tapi vendor belum submit final quotation baru.")
+
             st.markdown("##### 📌 Ringkasan Spesifikasi per Vendor")
             summary_df = build_vendor_summary(df_m, vendor_list_sorted)
             st.dataframe(summary_df, hide_index=True, use_container_width=True)
@@ -1275,6 +1477,24 @@ def proc_portal_comparison():
 
             weights_dict = {"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime}
 
+            # ---------------------------------------------------------
+            # MINTA NEGO: kirim ulang ke vendor terpilih buat final quotation
+            # ---------------------------------------------------------
+            st.markdown("##### 🤝 Minta Final Quotation (Nego)")
+            nego_vendors_sel = st.multiselect(
+                "Pilih vendor yang mau dimintai final quotation:",
+                vendor_list_sorted,
+                key=f"nego_sel_{active_id}",
+            )
+            nego_note = st.text_input("Catatan buat vendor (opsional):", key=f"nego_note_{active_id}")
+            if st.button("📨 Kirim Permintaan Nego", use_container_width=True, disabled=not nego_vendors_sel):
+                name_to_id = {v: k for k, v in vendor_id_to_name.items()}
+                v_ids = [name_to_id[v] for v in nego_vendors_sel if v in name_to_id]
+                notified = request_nego(active_id, v_ids, nego_note)
+                st.toast(f"Permintaan nego terkirim ke {notified} vendor.", icon="🤝")
+                st.success(f"✅ Permintaan final quotation terkirim ke: {', '.join(nego_vendors_sel)}")
+                st.rerun()
+
             st.divider()
             render_ai_insight(
                 display_df, rfq_title_active,
@@ -1287,7 +1507,7 @@ def proc_portal_comparison():
             pdf_bytes = generate_cqr_pdf(
                 rfq_title_active, pr_info["pr_code"], loc_active, weights_dict,
                 display_df, cost_saving, saving_pct, recommended_total, ai_insight_text,
-                summary_df=summary_df,
+                summary_df=summary_df, split_data=split_data,
             )
             st.write(" ")
             if pdf_bytes:
@@ -1309,6 +1529,21 @@ def proc_portal_comparison():
 
                     if item_ids:
                         sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
+
+                        # Simpan vendor pemenang per item (dari rekomendasi yang lagi ditampilkan)
+                        # supaya vendor bisa lihat status menang/kalah di History mereka.
+                        name_to_id = {v: k for k, v in vendor_id_to_name.items()}
+                        for _, r in pivot_items.iterrows():
+                            best_v_name = recommended_vendor_per_item.get(r["Barang"])
+                            best_v_id = name_to_id.get(best_v_name)
+                            if r.get("item_id") and best_v_id:
+                                try:
+                                    sb.table("pr_items").update(
+                                        {"awarded_vendor_id": best_v_id}
+                                    ).eq("id", r["item_id"]).execute()
+                                except Exception:
+                                    pass
+
                         st.toast("RFQ Berhasil Diarsip!", icon="🔒")
                         st.success(f"🎉 RFQ '{rfq_title_active}' telah ditandai sebagai Submitted & berhasil diarsip.")
                         st.session_state["active_compare_pr_id"] = None
@@ -1691,6 +1926,12 @@ def vendor_portal(vendor_id):
             st.title(f"📝 Penawaran Harga: {group['title']}")
             # INFO PIC DITAMBAHKAN DISINI
             st.caption(f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} | **No. PR:** {group['pr_code']}")
+
+            # Round nego aktif untuk RFQ ini (ambil round tertinggi antar item, biasanya sama semua)
+            current_round = max((a.get("current_round") or 1) for a in group["rows"])
+            if current_round > 1:
+                st.warning(f"🤝 **Ronde Nego ke-{current_round}** — PIC meminta Anda mengirimkan Final Quotation. Harga di bawah adalah penawaran pertama Anda sebagai referensi, silakan update ke harga terbaik.")
+
             st.divider()
             st.markdown("##### ✏️ Masukkan Harga & Detail Penawaran:")
             # Attachment File
@@ -1709,9 +1950,11 @@ def vendor_portal(vendor_id):
                 full_desc = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
                 clean_item_name = clean_description(full_desc)
             
-                # 2. Ambil data quote lama jika ada
+                # 2. Ambil data quote: utamakan quote di ROUND SAAT INI, kalau belum ada
+                #    fallback ke quote round sebelumnya sebagai starting point.
                 existing_quotes = a.get("quotes") or []
-                last_quote = existing_quotes[-1] if existing_quotes else {}
+                this_round_quotes = [q for q in existing_quotes if (q.get("round") or 1) == current_round]
+                last_quote = this_round_quotes[-1] if this_round_quotes else (existing_quotes[-1] if existing_quotes else {})
             
                 table_rows.append({
                     "assignment_id": a["id"],
@@ -1793,6 +2036,7 @@ def vendor_portal(vendor_id):
                         ass_id, vendor_id,
                         r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
                         r["Ready Stock"], r["Warranty"], r["Spesifikasi Vendor"],
+                        round_num=current_round,
                     )
                     if not ok:
                         all_ok = False
@@ -1867,7 +2111,7 @@ def vendor_portal(vendor_id):
         st.header("🔍 History Penawaran Saya")
         res_hist = (
             sb.table("quotes")
-            .select("unit_price, brand, ready_stock, lead_time_days, created_at, rfq_assignments(status, pr_items(description, description2, quantity, uom, purchase_requests(rfq_title, pr_code, profiles(vendor_name)))))")
+            .select("unit_price, brand, ready_stock, lead_time_days, created_at, round, rfq_assignments(status, pr_items(id, description, description2, quantity, uom, awarded_vendor_id, purchase_requests(rfq_title, pr_code, profiles(vendor_name)))))")
             .eq("vendor_id", vendor_id)
             .execute()
         )
@@ -1886,6 +2130,18 @@ def vendor_portal(vendor_id):
                 # FORMAT HARGA XXX.XXX BER-TITIK DI HISTORY
                 formatted_price = f"Rp {q.get('unit_price', 0):,.0f}".replace(",", ".")
 
+                # Status Menang/Kalah -- cuma tampil kalau PIC sudah "Mark as Submitted"
+                is_submitted = ass.get("status") == "Submitted"
+                awarded_vendor_id = item.get("awarded_vendor_id")
+                if not is_submitted:
+                    status_menang = "⏳ Menunggu Keputusan"
+                elif awarded_vendor_id == vendor_id:
+                    status_menang = "🏆 Menang"
+                elif awarded_vendor_id:
+                    status_menang = "❌ Kalah"
+                else:
+                    status_menang = "-"
+
                 rows_h.append({
                     "Judul RFQ": pr.get("rfq_title") or pr.get("pr_code"),
                     "PIC Procurement": pic_name,
@@ -1896,6 +2152,8 @@ def vendor_portal(vendor_id):
                     "Brand": q.get("brand"),
                     "Ready Stock": q.get("ready_stock"),
                     "Lead Time": f"{q.get('lead_time_days')} hari",
+                    "Round": f"Round {q.get('round') or 1}",
+                    "Status": status_menang,
                     "Tanggal Submit": q.get("created_at")[:10] if q.get("created_at") else "-",
                 })
             st.dataframe(pd.DataFrame(rows_h), hide_index=True, use_container_width=True)
@@ -1961,6 +2219,16 @@ def main():
     if "selected_items_dict" not in st.session_state:
         st.session_state["selected_items_dict"] = {}
 
+    # Kalau session_state kosong (misal tab diem lama trus browser reconnect),
+    # coba restore login dari token yang nempel di URL.
+    if st.session_state["user_info"] is None:
+        token_from_url = st.query_params.get("token")
+        if token_from_url:
+            restored_profile = get_session_user(token_from_url)
+            if restored_profile:
+                st.session_state["user_info"] = restored_profile
+                st.session_state["session_token"] = token_from_url
+
     if st.session_state["user_info"] is None:
         show_login()
         return
@@ -1972,10 +2240,13 @@ def main():
     st.sidebar.caption(f"Role: `{user.get('role', '').upper()}`")
     
     if st.sidebar.button("🚪 Log Out", use_container_width=True):
+        delete_session(st.session_state.get("session_token"))
         st.session_state["user_info"] = None
         st.session_state["selected_items_dict"] = {}
         st.session_state["active_compare_pr_id"] = None
         st.session_state["active_vendor_rfq_id"] = None
+        st.session_state.pop("session_token", None)
+        st.query_params.clear()
         st.rerun()
         
     st.sidebar.markdown("---")
