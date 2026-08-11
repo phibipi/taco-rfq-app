@@ -1383,6 +1383,7 @@ def proc_portal_comparison():
             clean_name = clean_description(full_item_name)
 
             data_matrix.append({
+                "item_id": item.get("id"),
                 "Barang": clean_name,
                 "Spesifikasi": q.get("spec_vendor", "-"),
                 "Qty": item.get("quantity", 0),
@@ -1432,7 +1433,7 @@ def proc_portal_comparison():
                     price_lookup[(r["Barang"], v)] = float(match.iloc[0]["price"]) if not match.empty else None
 
             # Susun tabel tampilan: per vendor -> Price/Unit & Total Price (mirip format CQR)
-            display_df = pivot_items.copy()
+            display_df = pivot_items.drop(columns=["item_id"]).copy()
             for v in vendor_list_sorted:
                 price_col, total_col = [], []
                 for _, r in pivot_items.iterrows():
