@@ -568,6 +568,111 @@ def send_rfq_email(vendor_email, vendor_name, rfq_title, deadline_str, items_tex
 
 
 # =====================================================================
+# AI OCR: BACA PDF QUOTATION VENDOR (GEMINI VISION)
+# =====================================================================
+def extract_quote_from_pdf(pdf_bytes, items_list):
+    """Baca PDF quotation vendor pakai Gemini Vision, cocokkan ke daftar barang RFQ.
+    HASIL INI DRAFT — vendor WAJIB review sebelum submit, tidak ada auto-submit."""
+    if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
+        return None, "Fitur AI OCR belum aktif — tambahkan `gemini.api_key` di secrets."
+    try:
+        import google.generativeai as genai
+        import json
+    except ImportError:
+        return None, "Library `google-generativeai` belum terinstall."
+
+    api_key = st.secrets["gemini"]["api_key"].strip()
+    genai.configure(api_key=api_key)
+
+    items_text = "\n".join(f"- {it}" for it in items_list)
+
+    prompt = f"""Kamu adalah asisten admin procurement. Baca dokumen PDF quotation/penawaran
+vendor berikut ini (bisa berupa hasil scan atau tulisan tangan, tidak harus rapi).
+
+Daftar barang yang PERLU dicocokkan dari RFQ kami (cocokkan berdasarkan kemiripan nama,
+bukan harus persis sama):
+{items_text}
+
+Untuk SETIAP barang yang berhasil kamu temukan datanya di dokumen, ekstrak:
+- nama_barang_rfq (harus persis salah satu dari daftar di atas, pilih yang paling cocok)
+- unit_price (angka saja, tanpa titik/koma/simbol mata uang)
+- brand (merk/tipe kalau ada, kalau tidak ada isi "-")
+- lead_time_days (angka hari, kalau tidak ada isi 7)
+- ready_stock ("Ya" atau "Tidak")
+- warranty (kalau ada, kalau tidak "-")
+- confidence ("high" kalau kamu yakin, "low" kalau tulisan/angka kurang jelas)
+
+PENTING: Jika tulisan tidak jelas, tetap isi dengan tebakan terbaik, tapi tandai
+confidence "low" untuk baris itu.
+
+Jawab HANYA dengan JSON array, tanpa markdown/backtick/penjelasan tambahan. Format:
+[{{"nama_barang_rfq": "...", "unit_price": 0, "brand": "-", "lead_time_days": 7, "ready_stock": "Ya", "warranty": "-", "confidence": "high"}}]
+"""
+    try:
+        model = genai.GenerativeModel("gemini-flash-latest")
+        res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
+        raw = (res.text or "").strip()
+        raw = re.sub(r"^```json|```$", "", raw, flags=re.MULTILINE).strip()
+        parsed = json.loads(raw)
+        result = {}
+        for row in parsed:
+            key = str(row.get("nama_barang_rfq", "")).strip()
+            if key:
+                result[key] = row
+        return result, None
+    except Exception as e:
+        return None, str(e)
+
+
+# =====================================================================
+# AI COST ESTIMATOR: HARGA KOMODITAS ACUAN + BREAKDOWN OE (WEB-GROUNDED)
+# =====================================================================
+def get_ai_cost_estimate(item_name, additional_desc=""):
+    """Cari harga komoditas acuan (web-grounded via Gemini) + breakdown OE estimasi.
+    SELALU estimasi AI — wajib direview manual, bukan harga mengikat."""
+    if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
+        return None, "Fitur AI belum aktif — tambahkan `gemini.api_key` di secrets."
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return None, "Library `google-generativeai` belum terinstall."
+
+    api_key = st.secrets["gemini"]["api_key"].strip()
+    genai.configure(api_key=api_key)
+
+    prompt = f"""Kamu adalah Cost Analyst procurement sparepart industri.
+Item: {item_name}
+Info tambahan dari PIC: {additional_desc or '-'}
+
+Tugas:
+1. Cari harga komoditas/material dasar yang relevan sebagai komponen item ini
+   (misal baja, alumunium, tembaga, dll) dari sumber terkini seperti London Metal
+   Exchange atau data pasar publik lain yang kamu temukan lewat pencarian.
+2. Berikan estimasi breakdown biaya: % Material, % Jasa/Manufaktur, % Margin vendor
+   (pakai asumsi umum industri kalau data pasti tidak tersedia).
+3. Berikan range harga wajar (Rp) untuk item ini berdasarkan asumsi di atas.
+
+WAJIB tulis di bagian akhir bahwa ini ESTIMASI AI, bukan harga final/mengikat, dan
+wajib direview manual oleh tim procurement sebelum dipakai untuk negosiasi.
+
+Format jawaban Markdown dengan heading persis seperti ini:
+### 📊 Harga Komoditas Acuan
+### 🧮 Estimasi Breakdown Biaya
+### 💰 Range Harga Wajar
+### ⚠️ Disclaimer
+"""
+    try:
+        try:
+            model = genai.GenerativeModel("gemini-flash-latest", tools=[{"google_search": {}}])
+        except Exception:
+            model = genai.GenerativeModel("gemini-flash-latest")
+        res = model.generate_content(prompt)
+        return res.text, None
+    except Exception as e:
+        return None, str(e)
+
+
+# =====================================================================
 # AI EXECUTIVE INSIGHT + CHAT PROMPT MANUAL
 # =====================================================================
 def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, saving_pct=None, recommended_total=None):
@@ -1705,6 +1810,33 @@ def check_and_send_vendor_reminders(pr_id, rfq_title):
 
     return reminded_count
 # =====================================================================
+# UI: PROC - AI COST ESTIMATOR (HARGA KOMODITAS + BREAKDOWN OE)
+# =====================================================================
+def proc_portal_cost_estimator():
+    st.header("🧮 AI Cost Estimator")
+    st.caption(
+        "⚠️ Semua hasil di halaman ini adalah **estimasi AI** berbasis pencarian web "
+        "(harga komoditas publik & asumsi industri umum) — wajib direview manual oleh "
+        "procurement, bukan harga final/mengikat."
+    )
+
+    item_name = st.text_input("Nama Barang / Material", placeholder="Contoh: Bearing SKF 6205")
+    additional_desc = st.text_area(
+        "Deskripsi tambahan (opsional — makin detail, makin akurat pencarian AI)",
+        placeholder="Contoh: dipakai di conveyor gudang, material steel, butuh tahan panas & abrasi tinggi...",
+    )
+
+    if st.button("🔍 Cari Harga Komoditas & Breakdown OE", type="primary", disabled=not item_name):
+        with st.spinner("AI sedang mencari data harga & menyusun estimasi..."):
+            result, err = get_ai_cost_estimate(item_name, additional_desc)
+        if err:
+            st.error(f"Gagal memproses: {err}")
+        elif result:
+            with st.container(border=True):
+                st.markdown(result)
+
+
+# =====================================================================
 # UI: PROC - HISTORY RFQ
 # =====================================================================
 def proc_portal_history():
@@ -1939,6 +2071,37 @@ def vendor_portal(vendor_id):
             if attachments:
                 st.markdown("**📎 File Referensi Lampiran:** " + ", ".join(f"`{a['file_name']}`" for a in attachments))
 
+            # AI OCR: Upload PDF quotation dulu (opsional) biar AI bantu isi otomatis
+            st.markdown("##### 📎 Upload PDF Quotation (Opsional — bantu AI isi otomatis)")
+            ocr_pdf = st.file_uploader(
+                "Upload PDF penawaran buat dibaca AI", type=["pdf"], key=f"ocr_pdf_{active_rfq_id}"
+            )
+            if ocr_pdf is not None and st.button("🔍 Baca Otomatis Pakai AI", key=f"ocr_btn_{active_rfq_id}"):
+                items_names = []
+                for a in group["rows"]:
+                    it = a.get("pr_items") or {}
+                    d1 = str(it.get("description") or "").strip()
+                    d2 = str(it.get("description2") or "").strip()
+                    fd = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
+                    items_names.append(clean_description(fd))
+                with st.spinner("AI sedang membaca PDF..."):
+                    extracted, ocr_err = extract_quote_from_pdf(ocr_pdf.getvalue(), items_names)
+                if ocr_err:
+                    st.error(f"Gagal membaca PDF: {ocr_err}")
+                elif extracted:
+                    st.session_state[f"ocr_result_{active_rfq_id}"] = extracted
+                    st.success(f"✅ {len(extracted)} baris berhasil dibaca. Cek & koreksi di tabel di bawah sebelum kirim.")
+                    st.rerun()
+                else:
+                    st.warning("AI tidak menemukan data yang cocok di PDF ini.")
+
+            ocr_result = st.session_state.get(f"ocr_result_{active_rfq_id}", {})
+            if ocr_result:
+                st.caption(
+                    "⚠️ Sebagian data di bawah adalah hasil bacaan AI dari PDF — **wajib dicek ulang**, "
+                    "terutama baris bertanda confidence rendah, sebelum kirim penawaran."
+                )
+
             # Data Preview Items untuk Vendor (Concat Description + Description2)
             table_rows = []
             for a in group["rows"]:
@@ -1955,18 +2118,23 @@ def vendor_portal(vendor_id):
                 existing_quotes = a.get("quotes") or []
                 this_round_quotes = [q for q in existing_quotes if (q.get("round") or 1) == current_round]
                 last_quote = this_round_quotes[-1] if this_round_quotes else (existing_quotes[-1] if existing_quotes else {})
-            
+
+                # 3. Kalau ada hasil OCR buat barang ini, prioritaskan nilainya (tetap draft, wajib direview)
+                ocr_row = ocr_result.get(clean_item_name)
+                confidence_tag = ocr_row.get("confidence", "-") if ocr_row else "-"
+
                 table_rows.append({
                     "assignment_id": a["id"],
                     "Barang": clean_item_name,                     # Concat Nama Barang
                     "Spesifikasi Vendor": last_quote.get("spec_vendor", "-"), # Diisi Vendor
                     "Qty": item.get("quantity", 0),
                     "UOM": item.get("uom", "-"),
-                    "Unit Price (IDR)": last_quote.get("unit_price", 0),
-                    "Brand": last_quote.get("brand", "-"),
-                    "Ready Stock": last_quote.get("ready_stock", "Ya"),
-                    "Lead Time (Hari)": last_quote.get("lead_time_days", 7),
-                    "Warranty": last_quote.get("warranty", "-"),
+                    "Unit Price (IDR)": (ocr_row.get("unit_price") if ocr_row else None) or last_quote.get("unit_price", 0),
+                    "Brand": (ocr_row.get("brand") if ocr_row else None) or last_quote.get("brand", "-"),
+                    "Ready Stock": (ocr_row.get("ready_stock") if ocr_row else None) or last_quote.get("ready_stock", "Ya"),
+                    "Lead Time (Hari)": (ocr_row.get("lead_time_days") if ocr_row else None) or last_quote.get("lead_time_days", 7),
+                    "Warranty": (ocr_row.get("warranty") if ocr_row else None) or last_quote.get("warranty", "-"),
+                    "🤖 AI Confidence": confidence_tag,
                 })
             
             df_preview = pd.DataFrame(table_rows)
@@ -1992,8 +2160,12 @@ def vendor_portal(vendor_id):
                 hide_index=True,
                 use_container_width=True,
                 row_height=80,
-                disabled=["Barang", "Qty", "UOM"], # Barang, Qty, UOM dikunci
+                disabled=["Barang", "Qty", "UOM", "🤖 AI Confidence"], # Barang, Qty, UOM, & tag AI dikunci
                 column_config={
+                    "🤖 AI Confidence": st.column_config.TextColumn(
+                        "🤖 AI Conf.", width="small",
+                        help="Tingkat keyakinan AI saat membaca PDF (kalau diisi via OCR). Selalu cek ulang baris 'low'."
+                    ),
                     "Barang": st.column_config.TextColumn(
                         "Barang",
                         width=280,  # Lebar fix (px) supaya word-wrap kepakai konsisten
@@ -2029,25 +2201,29 @@ def vendor_portal(vendor_id):
                     st.caption(f"📄 {d['file_name']} — {d['uploaded_at'][:10]}")
 
             if st.button("🚀 Kirim Penawaran", type="primary", use_container_width=True):
-                all_ok = True
-                for idx, r in edited.iterrows():
-                    ass_id = df_preview.iloc[idx]["assignment_id"]
-                    ok, err = submit_quote(
-                        ass_id, vendor_id,
-                        r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
-                        r["Ready Stock"], r["Warranty"], r["Spesifikasi Vendor"],
-                        round_num=current_round,
-                    )
-                    if not ok:
-                        all_ok = False
-                        st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
+                has_doc = official_doc is not None or bool(existing_docs)
+                if not has_doc:
+                    st.error("❌ Mohon upload PDF quotation resmi (kop surat/tandatangan) dulu sebelum mengirim penawaran.")
+                else:
+                    all_ok = True
+                    for idx, r in edited.iterrows():
+                        ass_id = df_preview.iloc[idx]["assignment_id"]
+                        ok, err = submit_quote(
+                            ass_id, vendor_id,
+                            r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
+                            r["Ready Stock"], r["Warranty"], r["Spesifikasi Vendor"],
+                            round_num=current_round,
+                        )
+                        if not ok:
+                            all_ok = False
+                            st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
 
-                if all_ok:
-                    if official_doc is not None:
-                        upload_vendor_document(active_rfq_id, vendor_id, official_doc)
-                    st.success(f"🎉 Penawaran berhasil dikirim!")
-                    st.session_state["active_vendor_rfq_id"] = None
-                    st.rerun()
+                    if all_ok:
+                        if official_doc is not None:
+                            upload_vendor_document(active_rfq_id, vendor_id, official_doc)
+                        st.success(f"🎉 Penawaran berhasil dikirim!")
+                        st.session_state["active_vendor_rfq_id"] = None
+                        st.rerun()
 
         # TAMPILAN CARD LIST RFQ
         else:
@@ -2173,6 +2349,7 @@ def combined_admin_portal():
     menu_options = [
         ("📥 Import PR List", "proc_import"),
         ("📊 Price Comparison", "proc_compare"),
+        ("🧮 AI Cost Estimator", "proc_estimator"),
         ("🔍 History RFQ", "proc_history"),
         ("➕ Daftarkan PIC", "admin_pic"),
         ("➕ Daftarkan Vendor", "admin_vendor"),
@@ -2200,6 +2377,8 @@ def combined_admin_portal():
         proc_portal_import()
     elif selected_page == "📊 Price Comparison":
         proc_portal_comparison()
+    elif selected_page == "🧮 AI Cost Estimator":
+        proc_portal_cost_estimator()
     elif selected_page == "🔍 History RFQ":
         proc_portal_history()
     elif selected_page == "➕ Daftarkan PIC":
