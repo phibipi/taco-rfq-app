@@ -1038,10 +1038,26 @@ def proc_portal_import():
 # UI: PROC - MONITORING & COMPARISON (UPDATED)
 # =====================================================================
 def proc_portal_comparison():
-    res_pr = sb.table("purchase_requests").select(
-        "id, pr_code, location, priority_status, rfq_title, created_at, pic_viewed_at"
-    ).execute()
-    df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
+    try:
+        res_pr = sb.table("purchase_requests").select(
+            "id, pr_code, location, priority_status, rfq_title, created_at, pic_viewed_at"
+        ).execute()
+        df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
+    except Exception:
+        # Fallback: kolom pic_viewed_at/created_at belum ada di DB (migration belum jalan).
+        # App tetap jalan, cuma badge "Baru/Sudah Dibuka" & sort-by-newest gak aktif dulu.
+        st.warning(
+            "⚠️ Kolom `pic_viewed_at`/`created_at` belum ada di tabel `purchase_requests`. "
+            "Jalankan SQL migration di Supabase (lihat instruksi sebelumnya) supaya sorting "
+            "terbaru & badge 'Baru/Sudah Dibuka' aktif. Untuk sekarang, list ditampilkan tanpa fitur itu."
+        )
+        res_pr = sb.table("purchase_requests").select(
+            "id, pr_code, location, priority_status, rfq_title"
+        ).execute()
+        df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
+        if not df_pr.empty:
+            df_pr["created_at"] = None
+            df_pr["pic_viewed_at"] = None
 
     active_id = st.session_state.get("active_compare_pr_id")
 
