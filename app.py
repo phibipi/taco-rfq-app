@@ -1040,14 +1040,14 @@ def proc_portal_import():
 def proc_portal_comparison():
     try:
         res_pr = sb.table("purchase_requests").select(
-            "id, pr_code, location, priority_status, rfq_title, created_at, pic_viewed_at"
+            "id, pr_code, location, priority_status, rfq_title, uploaded_at, pic_viewed_at"
         ).execute()
         df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
     except Exception:
-        # Fallback: kolom pic_viewed_at/created_at belum ada di DB (migration belum jalan).
+        # Fallback: kolom pic_viewed_at/uploaded_at belum ada di DB (migration belum jalan).
         # App tetap jalan, cuma badge "Baru/Sudah Dibuka" & sort-by-newest gak aktif dulu.
         st.warning(
-            "⚠️ Kolom `pic_viewed_at`/`created_at` belum ada di tabel `purchase_requests`. "
+            "⚠️ Kolom `pic_viewed_at`/`uploaded_at` belum ada di tabel `purchase_requests`. "
             "Jalankan SQL migration di Supabase (lihat instruksi sebelumnya) supaya sorting "
             "terbaru & badge 'Baru/Sudah Dibuka' aktif. Untuk sekarang, list ditampilkan tanpa fitur itu."
         )
@@ -1056,7 +1056,7 @@ def proc_portal_comparison():
         ).execute()
         df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
         if not df_pr.empty:
-            df_pr["created_at"] = None
+            df_pr["uploaded_at"] = None
             df_pr["pic_viewed_at"] = None
 
     active_id = st.session_state.get("active_compare_pr_id")
@@ -1368,8 +1368,8 @@ def proc_portal_comparison():
 
             # Sort: RFQ paling baru dikirim ada di paling atas
             df_pr_sorted = df_pr.copy()
-            df_pr_sorted["created_at"] = pd.to_datetime(df_pr_sorted.get("created_at"), errors="coerce")
-            df_pr_sorted = df_pr_sorted.sort_values("created_at", ascending=False, na_position="last")
+            df_pr_sorted["uploaded_at"] = pd.to_datetime(df_pr_sorted.get("uploaded_at"), errors="coerce")
+            df_pr_sorted = df_pr_sorted.sort_values("uploaded_at", ascending=False, na_position="last")
 
             st.markdown("---")
 
@@ -1683,7 +1683,7 @@ def vendor_portal(vendor_id):
                 "location": pr.get("location", "-"),
                 "prio": str(pr.get("priority_status", "")),
                 "pic_name": pic_name,
-                "created_at": pr.get("created_at"),
+                "created_at": pr.get("uploaded_at"),
                 "rows": []
             })
             pr_groups[pr.get("id")]["rows"].append(a)
