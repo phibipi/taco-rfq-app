@@ -180,6 +180,28 @@ def get_already_published_keys():
     return keys
 
 
+def mark_pic_viewed(pr_id):
+    """Tandai RFQ sudah dibuka oleh PIC (sekali saja, kalau masih null)."""
+    try:
+        sb.table("purchase_requests").update(
+            {"pic_viewed_at": datetime.now().isoformat()}
+        ).eq("id", pr_id).is_("pic_viewed_at", "null").execute()
+    except Exception:
+        pass
+
+
+def mark_vendor_viewed(assignment_ids):
+    """Tandai assignment-assignment RFQ sudah dibuka vendor (sekali saja, kalau masih null)."""
+    if not assignment_ids:
+        return
+    try:
+        sb.table("rfq_assignments").update(
+            {"vendor_viewed_at": datetime.now().isoformat()}
+        ).in_("id", assignment_ids).is_("vendor_viewed_at", "null").execute()
+    except Exception:
+        pass
+
+
 # =====================================================================
 # PUBLISH RFQ
 # =====================================================================
@@ -742,8 +764,11 @@ def show_login():
                     st.error("Email atau Password salah.")
 
 
+@st.fragment
 def render_pr_list(df_source, already_published):
-    """Render list PR + checkbox item, dipakai buat tab Urgent & Normal."""
+    """Render list PR + checkbox item, dipakai buat tab Urgent & Normal.
+    Dibungkus @st.fragment supaya centang checkbox / Pilih Semua / Hapus Semua
+    cuma rerun bagian ini aja, bukan seluruh halaman (biar gak blinking)."""
     if df_source.empty:
         st.info("Tidak ada item di kategori ini.")
         return
@@ -761,13 +786,13 @@ def render_pr_list(df_source, already_published):
             if cA.button("✅ Pilih Semua", key=f"all_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state["selected_items_dict"][k] = True
-                st.rerun()
+                st.rerun(scope="fragment")
                 
             # Tombol Hapus Semua
             if cB.button("🗑️ Hapus Semua", key=f"none_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state["selected_items_dict"][k] = False
-                st.rerun()
+                st.rerun(scope="fragment")
 
             h1, h2, h3, h4, h5 = st.columns([0.5, 3, 3, 1, 1])
             h1.markdown("**✓**")
@@ -860,7 +885,7 @@ def proc_portal_import():
 
     # Controls: Search, Collapse, & Location Filter
     c_search, c_exp = st.columns([3, 1])
-    search_query = c_search.text_input("🔍 Cari No. PR atau Nama Item...")
+    search_query = c_search.text_input("🔍 Cari (semua kolom: No. PR, Deskripsi, Lokasi, UOM, dll)...")
     
     if c_exp.button("📂 Collapse All" if st.session_state["expand_all"] else "📂 Expand All", use_container_width=True):
         st.session_state["expand_all"] = not st.session_state["expand_all"]
@@ -873,14 +898,14 @@ def proc_portal_import():
     
     selected_loc = st.selectbox("📍 Filter Lokasi Pengiriman:", locations)
 
-    # Apply Filter
+    # Apply Filter -- OPEN SEARCH: cari di SEMUA kolom (kecuali ROW_KEY internal)
     df_to_show = df_display.copy()
     if search_query:
-        q = search_query.lower()
-        mask = (
-            df_to_show.get("PR CODE", pd.Series()).astype(str).str.lower().str.contains(q, na=False)
-            | df_to_show.get("DESCRIPTION", pd.Series()).astype(str).str.lower().str.contains(q, na=False)
-        )
+        q = search_query.lower().strip()
+        search_cols = [c for c in df_to_show.columns if c != "ROW_KEY"]
+        mask = pd.Series(False, index=df_to_show.index)
+        for col in search_cols:
+            mask = mask | df_to_show[col].astype(str).str.lower().str.contains(q, na=False, regex=False)
         df_to_show = df_to_show[mask]
 
     if selected_loc != "Semua Lokasi" and "LOCATION" in df_to_show.columns:
@@ -1013,7 +1038,9 @@ def proc_portal_import():
 # UI: PROC - MONITORING & COMPARISON (UPDATED)
 # =====================================================================
 def proc_portal_comparison():
-    res_pr = sb.table("purchase_requests").select("id, pr_code, location, priority_status, rfq_title").execute()
+    res_pr = sb.table("purchase_requests").select(
+        "id, pr_code, location, priority_status, rfq_title, created_at, pic_viewed_at"
+    ).execute()
     df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
 
     active_id = st.session_state.get("active_compare_pr_id")
@@ -1193,6 +1220,59 @@ def proc_portal_comparison():
             summary_df = build_vendor_summary(df_m, vendor_list_sorted)
             st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
+            # ---------------------------------------------------------
+            # SPLIT PO: kelompokkan item berdasarkan vendor rekomendasi
+            # (kalau vendor terbaik beda-beda per item, PIC bisa split PO)
+            # ---------------------------------------------------------
+            split_data = {}
+            for _, r in pivot_items.iterrows():
+                best_v = recommended_vendor_per_item.get(r["Barang"])
+                if not best_v:
+                    continue
+                match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == best_v)]
+                if match.empty:
+                    continue
+                row_val = match.iloc[0]
+                split_data.setdefault(best_v, []).append({
+                    "Barang": r["Barang"],
+                    "Qty": r["Qty"],
+                    "UOM": r["UOM"],
+                    "Brand": row_val["brand"],
+                    "Unit Price": row_val["price"],
+                    "Total": row_val["total"],
+                    "Lead Time (Hari)": row_val["lead_time"],
+                })
+
+            if len(split_data) > 1:
+                st.markdown("##### 📦 Split PO — Rekomendasi Alokasi per Vendor")
+                st.caption(
+                    "Vendor terbaik beda-beda per item sesuai bobot di atas, jadi PO bisa displit "
+                    f"ke **{len(split_data)} vendor** berikut supaya tetap dapat kombinasi termurah/terbaik."
+                )
+                split_tabs = st.tabs([f"📦 {v} ({len(items)} item)" for v, items in split_data.items()])
+                for tab, (v_name, items) in zip(split_tabs, split_data.items()):
+                    with tab:
+                        df_split = pd.DataFrame(items)
+                        df_split_display = df_split.copy()
+                        df_split_display["Unit Price"] = df_split_display["Unit Price"].apply(lambda x: f"Rp {x:,.0f}".replace(",", "."))
+                        df_split_display["Total"] = df_split_display["Total"].apply(lambda x: f"Rp {x:,.0f}".replace(",", "."))
+                        st.dataframe(df_split_display, hide_index=True, use_container_width=True)
+                        subtotal = df_split["Total"].sum()
+                        st.metric(f"Subtotal PO — {v_name}", f"Rp {subtotal:,.0f}".replace(",", "."))
+
+                        po_buf = io.BytesIO()
+                        with pd.ExcelWriter(po_buf, engine="openpyxl") as writer:
+                            df_split.to_excel(writer, index=False, sheet_name="PO Items")
+                        st.download_button(
+                            f"📥 Download List PO — {v_name}",
+                            po_buf.getvalue(),
+                            f"PO_{rfq_title_active}_{v_name}.xlsx",
+                            key=f"po_dl_{pr_info['id']}_{v_name}",
+                            use_container_width=True,
+                        )
+            elif len(split_data) == 1:
+                st.caption("💡 Semua item direkomendasikan dari vendor yang sama — tidak perlu split PO.")
+
             # Dokumen resmi yang diupload vendor (kalau ada)
             all_docs = get_vendor_documents(active_id)
             if all_docs:
@@ -1252,34 +1332,67 @@ def proc_portal_comparison():
             st.info("Belum ada data RFQ yang dipublish.")
         else:
             st.write("Pilih salah satu RFQ di bawah untuk membuka **Halaman Detail Perbandingan**:")
-            st.markdown("---")
 
             quotes_res = sb.table("quotes").select("assignment_id").execute()
             submitted_ass_ids = set([q["assignment_id"] for q in quotes_res.data]) if quotes_res.data else set()
 
-            for _, pr_row in df_pr.iterrows():
+            # Ambil semua assignment + vendor + item sekali jalan untuk keperluan search & status
+            res_ass_full = (
+                sb.table("rfq_assignments")
+                .select("id, profiles(vendor_name), pr_items(pr_id, description, description2)")
+                .execute()
+            )
+            ass_by_pr = {}
+            for ass in (res_ass_full.data or []):
+                item = ass.get("pr_items") or {}
+                p_id = item.get("pr_id")
+                ass_by_pr.setdefault(p_id, []).append(ass)
+
+            search_query = st.text_input("🔍 Cari Judul RFQ / Lokasi / Vendor / Item...").strip().lower()
+
+            # Sort: RFQ paling baru dikirim ada di paling atas
+            df_pr_sorted = df_pr.copy()
+            df_pr_sorted["created_at"] = pd.to_datetime(df_pr_sorted.get("created_at"), errors="coerce")
+            df_pr_sorted = df_pr_sorted.sort_values("created_at", ascending=False, na_position="last")
+
+            st.markdown("---")
+
+            shown_count = 0
+            for _, pr_row in df_pr_sorted.iterrows():
                 pr_id = pr_row["id"]
                 title = pr_row.get("rfq_title") or f"PR: {pr_row['pr_code']}"
                 loc = pr_row.get("location") or "-"
                 prio = str(pr_row.get("priority_status") or "")
                 tag_prio = "🚨 URGENT" if "URGENT" in prio.upper() else "📦 NORMAL"
+                assignments_this_pr = ass_by_pr.get(pr_id, [])
+
+                # Bangun teks pencarian gabungan (judul, lokasi, vendor, item)
+                vendor_names = [(a.get("profiles") or {}).get("vendor_name", "") for a in assignments_this_pr]
+                item_texts = [
+                    f"{(a.get('pr_items') or {}).get('description', '')} {(a.get('pr_items') or {}).get('description2', '')}"
+                    for a in assignments_this_pr
+                ]
+                haystack = " ".join([str(title), str(loc), str(pr_row["pr_code"])] + vendor_names + item_texts).lower()
+                if search_query and search_query not in haystack:
+                    continue
+                shown_count += 1
+
+                # Badge status: Baru (belum pernah dibuka PIC) / Sudah Dibuka
+                is_new = pd.isna(pr_row.get("pic_viewed_at")) or not pr_row.get("pic_viewed_at")
+                status_badge = "🆕 Baru" if is_new else "👀 Sudah Dibuka"
 
                 with st.container(border=True):
                     c_info, c_btn = st.columns([4, 1])
 
                     with c_info:
                         st.subheader(f"📋 {title}")
-                        st.caption(f"📍 **Lokasi:** {loc} | **Priority:** {tag_prio} | **PR Code:** {pr_row['pr_code']}")
-
-                        res_ass = (
-                            sb.table("rfq_assignments")
-                            .select("*, profiles(vendor_name), pr_items!inner(pr_id)")
-                            .eq("pr_items.pr_id", pr_id)
-                            .execute()
+                        st.caption(
+                            f"📍 **Lokasi:** {loc} | **Priority:** {tag_prio} | **PR Code:** {pr_row['pr_code']} | {status_badge}"
                         )
-                        if res_ass.data:
+
+                        if assignments_this_pr:
                             vendor_status_map = {}
-                            for ass in res_ass.data:
+                            for ass in assignments_this_pr:
                                 vn = (ass.get("profiles") or {}).get("vendor_name", "Vendor")
                                 is_sub = ass["id"] in submitted_ass_ids
                                 vendor_status_map[vn] = vendor_status_map.get(vn, False) or is_sub
@@ -1290,8 +1403,12 @@ def proc_portal_comparison():
                     with c_btn:
                         st.write(" ")
                         if st.button("🔍 Buka Detail", key=f"open_detail_{pr_id}", type="primary", use_container_width=True):
+                            mark_pic_viewed(pr_id)
                             st.session_state["active_compare_pr_id"] = pr_id
                             st.rerun()
+
+            if search_query and shown_count == 0:
+                st.info("Tidak ada RFQ yang cocok dengan pencarian.")
 # =====================================================================
 # AUTO-REMINDER VENDOR (POIN 4)
 # =====================================================================
@@ -1550,9 +1667,19 @@ def vendor_portal(vendor_id):
                 "location": pr.get("location", "-"),
                 "prio": str(pr.get("priority_status", "")),
                 "pic_name": pic_name,
+                "created_at": pr.get("created_at"),
                 "rows": []
             })
             pr_groups[pr.get("id")]["rows"].append(a)
+
+        # Sort: RFQ paling baru dikirim ada di paling atas
+        pr_groups = dict(
+            sorted(
+                pr_groups.items(),
+                key=lambda kv: pd.to_datetime(kv[1].get("created_at"), errors="coerce") or pd.Timestamp.min,
+                reverse=True,
+            )
+        )
 
         active_rfq_id = st.session_state.get("active_vendor_rfq_id")
 
@@ -1685,24 +1812,60 @@ def vendor_portal(vendor_id):
         else:
             st.header("📋 List RFQ Aktif")
             st.write("Klik **Buka Detail** untuk mengisi penawaran harga:")
+
+            v_search = st.text_input("🔍 Cari Judul RFQ / Lokasi / PIC / Item...").strip().lower()
+
             st.markdown("---")
 
+            shown_count = 0
             for pr_id, group in pr_groups.items():
                 prio_tag = "🚨 URGENT" if "URGENT" in group["prio"].upper() else "📦 NORMAL"
-                
+
+                item_texts = []
+                for a in group["rows"]:
+                    it = a.get("pr_items") or {}
+                    item_texts.append(f"{it.get('description', '')} {it.get('description2', '')}")
+                haystack = " ".join(
+                    [group["title"], group["location"], group["pic_name"], group["pr_code"]] + item_texts
+                ).lower()
+                if v_search and v_search not in haystack:
+                    continue
+                shown_count += 1
+
+                # Status: Baru (belum dibuka sama sekali) / Dibuka belum submit / Sudah Submit (semua/sebagian)
+                total_rows = len(group["rows"])
+                viewed_rows = sum(1 for a in group["rows"] if a.get("vendor_viewed_at"))
+                submitted_rows = sum(1 for a in group["rows"] if a.get("quotes"))
+
+                if viewed_rows == 0:
+                    status_badge = "🆕 Baru"
+                elif submitted_rows == 0:
+                    status_badge = "👀 Sudah Dibuka (Belum Submit)"
+                elif submitted_rows < total_rows:
+                    status_badge = "🔶 Submit Sebagian"
+                else:
+                    status_badge = "✅ Sudah Submit"
+
                 with st.container(border=True):
                     c_info, c_btn = st.columns([4, 1])
 
                     with c_info:
                         st.subheader(f"📋 {group['title']}")
                         # INFO PIC DITAMBAHKAN PADA CARD LIST
-                        st.caption(f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} | **Priority:** {prio_tag} | **PR Code:** {group['pr_code']}")
+                        st.caption(
+                            f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} "
+                            f"| **Priority:** {prio_tag} | **PR Code:** {group['pr_code']} | {status_badge}"
+                        )
                     
                     with c_btn:
                         st.write(" ")
                         if st.button("🔍 Buka Detail", key=f"v_detail_{pr_id}", type="primary", use_container_width=True):
+                            mark_vendor_viewed([a["id"] for a in group["rows"]])
                             st.session_state["active_vendor_rfq_id"] = pr_id
                             st.rerun()
+
+            if v_search and shown_count == 0:
+                st.info("Tidak ada RFQ yang cocok dengan pencarian.")
 
     # -----------------------------------------------------------------
     # MENU 3: HISTORY RFQ
