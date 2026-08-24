@@ -5,3 +5,4 @@ openpyxl
 google-generativeai
 reportlab
 plotly>=5.18.0
+PyMuPDF
