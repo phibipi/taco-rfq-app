@@ -636,6 +636,10 @@ Jawab HANYA dengan JSON array, tanpa markdown/backtick/penjelasan tambahan. Form
 [{{"nama_barang_rfq": "...","spesifikasi": "-", "unit_price": 0, "brand": "-", "lead_time_days": 7, "ready_stock": "Ya", "warranty": "-"}}]
 """
     try:
+        generation_config = genai.GenerationConfig(
+            temperature=0,
+            max_output_tokens=2048,
+        )
         model = genai.GenerativeModel("gemini-flash-latest")
         res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
         raw = (res.text or "").strip()
