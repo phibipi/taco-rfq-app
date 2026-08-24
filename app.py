@@ -623,30 +623,30 @@ Untuk tiap barang yang ditemukan, ekstrak: nama_barang_rfq (harus salah satu dar
 Jawab HANYA JSON array tanpa markdown:
 [{{"nama_barang_rfq":"...","unit_price":0,"brand":"-","spesifikasi":"-","lead_time_days":7,"ready_stock":"Ya","warranty":"-"}}]
 """
-        generation_config = genai.GenerationConfig(
-            temperature=0,
-            max_output_tokens=2048,
-        )
-    
+    generation_config = genai.GenerationConfig(
+        temperature=0,
+        max_output_tokens=2048,
+    )
+
+    try:
         try:
-            try:
-                model = genai.GenerativeModel("gemini-flash-lite-latest", generation_config=generation_config)
-                res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
-            except Exception:
-                model = genai.GenerativeModel("gemini-flash-latest", generation_config=generation_config)
-                res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
-    
-            raw = (res.text or "").strip()
-            raw = re.sub(r"^```json|```$", "", raw, flags=re.MULTILINE).strip()
-            parsed = json.loads(raw)
-            result = {}
-            for row in parsed:
-                key = str(row.get("nama_barang_rfq", "")).strip()
-                if key:
-                    result[key] = row
-            return result, None
-        except Exception as e:
-            return None, str(e)
+            model = genai.GenerativeModel("gemini-flash-lite-latest", generation_config=generation_config)
+            res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
+        except Exception:
+            model = genai.GenerativeModel("gemini-flash-latest", generation_config=generation_config)
+            res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
+
+        raw = (res.text or "").strip()
+        raw = re.sub(r"^```json|```$", "", raw, flags=re.MULTILINE).strip()
+        parsed = json.loads(raw)
+        result = {}
+        for row in parsed:
+            key = str(row.get("nama_barang_rfq", "")).strip()
+            if key:
+                result[key] = row
+        return result, None
+    except Exception as e:
+        return None, str(e)
 
 
 # =====================================================================
