@@ -615,27 +615,39 @@ def extract_quote_from_pdf(pdf_bytes, items_list):
 
     items_text = "\n".join(f"- {it}" for it in items_list)
 
-    prompt = f"""Baca PDF quotation vendor ini (bisa scan/tulisan tangan). Cocokkan ke daftar barang berikut (berdasarkan kemiripan nama):
+    prompt = f"""Kamu adalah asisten admin procurement. Baca dokumen PDF quotation/penawaran
+vendor berikut ini dengan TELITI (bisa berupa hasil scan atau tulisan tangan, tidak harus rapi).
+Perhatikan khusus untuk ANGKA HARGA — baca digit per digit dengan hati-hati, jangan terburu-buru,
+karena kesalahan baca angka bisa berakibat fatal untuk keputusan pembelian.
+
+Daftar barang yang PERLU dicocokkan dari RFQ kami (cocokkan berdasarkan kemiripan nama,
+bukan harus persis sama):
 {items_text}
 
-Untuk tiap barang yang ditemukan, ekstrak: nama_barang_rfq (harus salah satu dari daftar di atas), unit_price (angka saja), brand, spesifikasi, lead_time_days (default 7), ready_stock ("Ya"/"Tidak"), warranty.
+Untuk SETIAP barang yang berhasil kamu temukan datanya di dokumen, ekstrak:
+- nama_barang_rfq (harus persis salah satu dari daftar di atas, pilih yang paling cocok)
+- unit_price (angka saja, tanpa titik/koma/simbol mata uang — baca dengan sangat teliti)
+- brand (merk/tipe kalau ada, kalau tidak ada isi "-")
+- spesifikasi (spesifikasi teknis/detail barang kalau tertulis di dokumen, kalau tidak ada isi "-")
+- lead_time_days (angka hari, kalau tidak ada isi 7)
+- ready_stock ("Ya" atau "Tidak")
+- warranty (kalau ada, kalau tidak "-")
 
-Jawab HANYA JSON array tanpa markdown:
-[{{"nama_barang_rfq":"...","unit_price":0,"brand":"-","spesifikasi":"-","lead_time_days":7,"ready_stock":"Ya","warranty":"-"}}]
+PENTING: Jika tulisan/angka tidak jelas, tetap isi dengan tebakan terbaik berdasarkan konteks
+di sekitarnya (misal pola harga barang sejenis di dokumen yang sama).
+
+Jawab HANYA dengan JSON array, tanpa markdown/backtick/penjelasan tambahan. Format:
+[{{"nama_barang_rfq": "...", "unit_price": 0, "brand": "-", "spesifikasi": "-", "lead_time_days": 7, "ready_stock": "Ya", "warranty": "-"}}]
 """
+
     generation_config = genai.GenerationConfig(
         temperature=0,
-        max_output_tokens=2048,
+        max_output_tokens=4096,
     )
 
     try:
-        try:
-            model = genai.GenerativeModel("gemini-flash-lite-latest", generation_config=generation_config)
-            res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
-        except Exception:
-            model = genai.GenerativeModel("gemini-flash-latest", generation_config=generation_config)
-            res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
-
+        model = genai.GenerativeModel("gemini-flash-latest", generation_config=generation_config)
+        res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
         raw = (res.text or "").strip()
         raw = re.sub(r"^```json|```$", "", raw, flags=re.MULTILINE).strip()
         parsed = json.loads(raw)
