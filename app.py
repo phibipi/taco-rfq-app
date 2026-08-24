@@ -393,7 +393,33 @@ def get_vendor_assignments(vendor_id):
         .execute()
     )
     return res.data
+def get_vendors_for_pr(pr_id):
+    """Dict {vendor_id: vendor_name} untuk vendor yang sudah di-assign ke RFQ ini."""
+    res = (
+        sb.table("rfq_assignments")
+        .select("vendor_id, profiles(vendor_name, email), pr_items!inner(pr_id)")
+        .eq("pr_items.pr_id", pr_id)
+        .execute()
+    )
+    vendors = {}
+    for r in res.data or []:
+        vid = r.get("vendor_id")
+        prof = r.get("profiles") or {}
+        if vid and vid not in vendors:
+            vendors[vid] = prof.get("vendor_name") or prof.get("email") or "Vendor"
+    return vendors
 
+
+def get_assignments_for_pr_vendor(pr_id, vendor_id):
+    """Assignment + item + quote existing untuk kombinasi RFQ & vendor tertentu — dipakai PIC input manual."""
+    res = (
+        sb.table("rfq_assignments")
+        .select("*, quotes(*), pr_items!inner(*)")
+        .eq("vendor_id", vendor_id)
+        .eq("pr_items.pr_id", pr_id)
+        .execute()
+    )
+    return res.data
 
 def get_pr_attachments(pr_id):
     res = sb.table("rfq_attachments").select("*").eq("pr_id", pr_id).execute()
@@ -1311,7 +1337,6 @@ def proc_portal_comparison():
             horizontal=True,
             label_visibility="collapsed",
         )
-        # Peta pilihan dropdown -> bobot skor (Harga, TOP, Ready Stock, Lead Time)
         weight_presets = {
             "Harga Termurah (Lowest Price)": (100, 0, 0, 0),
             "Lead Time Tercepat": (0, 0, 0, 100),
@@ -1319,17 +1344,54 @@ def proc_portal_comparison():
             "Kombinasi Bobot Skor (Default)": (40, 20, 20, 20),
         }
         w_price, w_top, w_stock, w_leadtime = weight_presets[sort_priority]
-
+        
+        # Key unik per RFQ biar slider gak nyampur antar RFQ
+        k_price = f"w_price_ss_{active_id}"
+        k_top = f"w_top_ss_{active_id}"
+        k_stock = f"w_stock_ss_{active_id}"
+        k_leadtime = f"w_leadtime_ss_{active_id}"
+        weight_keys = [k_price, k_top, k_stock, k_leadtime]
+        
+        # Reset slider ke nilai preset setiap kali preset dropdown berubah
+        if st.session_state.get(f"last_preset_{active_id}") != sort_priority:
+            st.session_state[k_price], st.session_state[k_top], st.session_state[k_stock], st.session_state[k_leadtime] = weight_presets[sort_priority]
+            st.session_state[f"last_preset_{active_id}"] = sort_priority
+        
+        def _rebalance_weights(changed_key):
+            """Callback: kalau satu slider digeser, sisa bobotnya didistribusikan proporsional ke slider lain supaya total tetap 100."""
+            total = sum(st.session_state[k] for k in weight_keys)
+            diff = 100 - total
+            if diff == 0:
+                return
+            others = [k for k in weight_keys if k != changed_key]
+            others_total = sum(st.session_state[k] for k in others)
+            if others_total <= 0:
+                share = diff / len(others)
+                for k in others:
+                    st.session_state[k] = max(0, min(100, round(st.session_state[k] + share)))
+            else:
+                for k in others:
+                    proportion = st.session_state[k] / others_total
+                    st.session_state[k] = max(0, min(100, round(st.session_state[k] + diff * proportion)))
+            # Rapikan sisa pembulatan biar totalnya pas 100
+            remainder = 100 - sum(st.session_state[k] for k in weight_keys)
+            if remainder != 0:
+                st.session_state[others[-1]] = max(0, min(100, st.session_state[others[-1]] + remainder))
+        
         with st.expander("⚙️ Atur bobot custom (opsional)"):
             use_custom = st.checkbox("Set bobot custom di bawah ini")
+            st.caption("Total bobot otomatis dijaga 100% — geser satu slider, yang lain menyesuaikan sendiri.")
             cw1, cw2, cw3, cw4 = st.columns(4)
-            cust_price = cw1.slider("💰 Harga", 0, 100, w_price)
-            cust_top = cw2.slider("📅 TOP", 0, 100, w_top)
-            cust_stock = cw3.slider("📦 Ready Stock", 0, 100, w_stock)
-            cust_leadtime = cw4.slider("⏱️ Lead Time", 0, 100, w_leadtime)
+            cw1.slider("💰 Harga", 0, 100, key=k_price, on_change=_rebalance_weights, args=(k_price,))
+            cw2.slider("📅 TOP", 0, 100, key=k_top, on_change=_rebalance_weights, args=(k_top,))
+            cw3.slider("📦 Ready Stock", 0, 100, key=k_stock, on_change=_rebalance_weights, args=(k_stock,))
+            cw4.slider("⏱️ Lead Time", 0, 100, key=k_leadtime, on_change=_rebalance_weights, args=(k_leadtime,))
             if use_custom:
-                w_price, w_top, w_stock, w_leadtime = cust_price, cust_top, cust_stock, cust_leadtime
-
+                w_price = st.session_state[k_price]
+                w_top = st.session_state[k_top]
+                w_stock = st.session_state[k_stock]
+                w_leadtime = st.session_state[k_leadtime]
+        
         st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Ready Stock {w_stock}% · Lead Time {w_leadtime}%")
 
         # Query data quotes & assignments untuk CQR Matrix Format
@@ -1844,6 +1906,161 @@ def proc_portal_cost_estimator():
             with st.container(border=True):
                 st.markdown(result)
 
+def proc_portal_manual_input():
+    st.header("✍️ Input Manual Penawaran (as Vendor)")
+    st.caption(
+        "Gunakan halaman ini kalau vendor kirim penawaran lewat cara lain (WhatsApp, email, telepon) "
+        "dan tidak bisa login sendiri ke portal. PIC bisa upload PDF penawarannya di sini (atau isi manual "
+        "tanpa PDF), dan hasilnya otomatis tercatat sebagai penawaran atas nama vendor tersebut."
+    )
+
+    res_pr = sb.table("purchase_requests").select("id, pr_code, location, rfq_title").execute()
+    df_pr_all = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
+    if df_pr_all.empty:
+        st.info("Belum ada RFQ yang dipublish.")
+        return
+
+    df_pr_all["label"] = df_pr_all.apply(
+        lambda r: (r.get("rfq_title") or r.get("pr_code")) + f" ({r.get('location') or '-'})", axis=1
+    )
+    sel_pr_label = st.selectbox("Pilih RFQ:", df_pr_all["label"])
+    pr_row = df_pr_all[df_pr_all["label"] == sel_pr_label].iloc[0]
+    pr_id = pr_row["id"]
+
+    vendors_map = get_vendors_for_pr(pr_id)
+    if not vendors_map:
+        st.warning("Belum ada vendor yang di-assign ke RFQ ini.")
+        return
+
+    sel_vendor_id = st.selectbox(
+        "Pilih Vendor:",
+        options=list(vendors_map.keys()),
+        format_func=lambda vid: vendors_map[vid],
+        key=f"manual_vendor_sel_{pr_id}",
+    )
+    vendor_name = vendors_map[sel_vendor_id]
+
+    assignments = get_assignments_for_pr_vendor(pr_id, sel_vendor_id)
+    if not assignments:
+        st.warning("Tidak ada item RFQ untuk kombinasi RFQ & vendor ini.")
+        return
+
+    current_round = max((a.get("current_round") or 1) for a in assignments)
+    if current_round > 1:
+        st.info(f"🤝 Vendor ini sedang di ronde nego ke-{current_round}.")
+
+    st.divider()
+    st.markdown(f"##### ✏️ Input Penawaran untuk **{vendor_name}**")
+
+    manual_key = f"manual_{pr_id}_{sel_vendor_id}"
+
+    st.markdown("##### 📎 Upload PDF Quotation Vendor (Opsional — isi tabel otomatis)")
+    ocr_pdf = st.file_uploader("Upload PDF penawaran vendor", type=["pdf"], key=f"ocr_pdf_{manual_key}")
+    if ocr_pdf is not None and st.button("🔍 Read", key=f"ocr_btn_{manual_key}"):
+        items_names = []
+        for a in assignments:
+            it = a.get("pr_items") or {}
+            d1 = str(it.get("description") or "").strip()
+            d2 = str(it.get("description2") or "").strip()
+            fd = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
+            items_names.append(clean_description(fd))
+        with st.spinner("AI sedang membaca PDF..."):
+            extracted, ocr_err = extract_quote_from_pdf(ocr_pdf.getvalue(), items_names)
+        if ocr_err:
+            st.error(f"Gagal membaca PDF: {ocr_err}")
+        elif extracted:
+            st.session_state[f"ocr_result_{manual_key}"] = extracted
+            doc_saved = upload_vendor_document(pr_id, sel_vendor_id, ocr_pdf)
+            if doc_saved:
+                st.success(f"✅ {len(extracted)} baris berhasil dibaca & file otomatis tersimpan sebagai dokumen resmi.")
+            else:
+                st.success(f"✅ {len(extracted)} baris berhasil dibaca.")
+            st.rerun()
+        else:
+            st.warning("AI tidak menemukan data yang cocok di PDF ini.")
+
+    ocr_result = st.session_state.get(f"ocr_result_{manual_key}", {})
+    if ocr_result:
+        st.caption("⚠️ Sebagian data di bawah adalah hasil bacaan dari PDF — wajib dicek ulang sebelum disimpan.")
+
+    table_rows = []
+    for a in assignments:
+        item = a.get("pr_items") or {}
+        d1 = str(item.get("description") or "").strip()
+        d2 = str(item.get("description2") or "").strip()
+        full_desc = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
+        clean_item_name = clean_description(full_desc)
+
+        existing_quotes = a.get("quotes") or []
+        this_round_quotes = [q for q in existing_quotes if (q.get("round") or 1) == current_round]
+        last_quote = this_round_quotes[-1] if this_round_quotes else (existing_quotes[-1] if existing_quotes else {})
+
+        ocr_row = ocr_result.get(clean_item_name)
+
+        table_rows.append({
+            "assignment_id": a["id"],
+            "Barang": clean_item_name,
+            "Spesifikasi": (ocr_row.get("spesifikasi") if ocr_row else None) or last_quote.get("spec_vendor", "-"),
+            "Qty": item.get("quantity", 0),
+            "UOM": item.get("uom", "-"),
+            "Unit Price (IDR)": (ocr_row.get("unit_price") if ocr_row else None) or last_quote.get("unit_price", 0),
+            "Brand": (ocr_row.get("brand") if ocr_row else None) or last_quote.get("brand", "-"),
+            "Ready Stock": (ocr_row.get("ready_stock") if ocr_row else None) or last_quote.get("ready_stock", "Ya"),
+            "Lead Time (Hari)": (ocr_row.get("lead_time_days") if ocr_row else None) or last_quote.get("lead_time_days", 7),
+            "Warranty": (ocr_row.get("warranty") if ocr_row else None) or last_quote.get("warranty", "-"),
+        })
+
+    df_preview = pd.DataFrame(table_rows)
+
+    edited = st.data_editor(
+        df_preview.drop(columns=["assignment_id"]),
+        key=f"editor_manual_{manual_key}",
+        hide_index=True,
+        use_container_width=True,
+        row_height=80,
+        disabled=["Barang", "Qty", "UOM"],
+        column_config={
+            "Barang": st.column_config.TextColumn("Barang", width=280),
+            "Spesifikasi": st.column_config.TextColumn("Spesifikasi", width="medium"),
+            "Qty": st.column_config.NumberColumn("Qty", width="small"),
+            "UOM": st.column_config.TextColumn("UOM", width="small"),
+            "Unit Price (IDR)": st.column_config.NumberColumn("Unit Price (IDR)", format="Rp %,d", min_value=0, step=1000),
+            "Ready Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=True),
+            "Lead Time (Hari)": st.column_config.NumberColumn("Lead Time (Hari)", min_value=1, step=1),
+            "Warranty": st.column_config.TextColumn("Warranty", width="small"),
+        },
+    )
+
+    st.markdown("##### 📎 Dokumen Resmi Vendor (opsional)")
+    st.caption("Kalau sudah otomatis tersimpan lewat proses Read di atas, langkah ini bisa dilewati.")
+    official_doc = st.file_uploader("Pilih file PDF", type=["pdf"], key=f"official_doc_manual_{manual_key}")
+
+    existing_docs = get_vendor_documents(pr_id, sel_vendor_id)
+    if existing_docs:
+        st.write("**Dokumen yang sudah ada:**")
+        for d in existing_docs:
+            st.caption(f"📄 {d['file_name']} — {d['uploaded_at'][:10]}")
+
+    if st.button("💾 Simpan Penawaran Vendor Ini", type="primary", use_container_width=True):
+        all_ok = True
+        for idx, r in edited.iterrows():
+            ass_id = df_preview.iloc[idx]["assignment_id"]
+            ok, err = submit_quote(
+                ass_id, sel_vendor_id,
+                r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
+                r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
+                round_num=current_round,
+            )
+            if not ok:
+                all_ok = False
+                st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
+
+        if all_ok:
+            if official_doc is not None:
+                upload_vendor_document(pr_id, sel_vendor_id, official_doc)
+            st.success(f"🎉 Penawaran atas nama {vendor_name} berhasil disimpan!")
+            st.session_state.pop(f"ocr_result_{manual_key}", None)
+            st.rerun()
 
 # =====================================================================
 # UI: PROC - HISTORY RFQ
@@ -2362,6 +2579,7 @@ def combined_admin_portal():
     menu_options = [
         ("📥 Import PR List", "proc_import"),
         ("📊 Price Comparison", "proc_compare"),
+        ("✍️ Input Manual (as Vendor)", "proc_manual"),
         ("🧮 AI Cost Estimator", "proc_estimator"),
         ("🔍 History RFQ", "proc_history"),
         ("➕ Daftarkan PIC", "admin_pic"),
@@ -2390,6 +2608,8 @@ def combined_admin_portal():
         proc_portal_import()
     elif selected_page == "📊 Price Comparison":
         proc_portal_comparison()
+    elif selected_page == "✍️ Input Manual (as Vendor)":   # ← baris baru
+        proc_portal_manual_input()
     elif selected_page == "🧮 AI Cost Estimator":
         proc_portal_cost_estimator()
     elif selected_page == "🔍 History RFQ":
