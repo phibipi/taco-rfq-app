@@ -613,9 +613,26 @@ def extract_quote_from_pdf(pdf_bytes, items_list):
     api_key = st.secrets["gemini"]["api_key"].strip()
     genai.configure(api_key=api_key)
 
+    # Kompres PDF jadi gambar resolusi sedang dulu -> kirim lebih ringan & lebih cepat diproses
+    # tanpa mengorbankan kejelasan angka/teks.
+    image_parts = []
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        zoom = 150 / 72  # target ~150 DPI
+        mat = fitz.Matrix(zoom, zoom)
+        for page in doc:
+            pix = page.get_pixmap(matrix=mat)
+            img_bytes = pix.tobytes("jpeg", jpg_quality=80)
+            image_parts.append({"mime_type": "image/jpeg", "data": img_bytes})
+        doc.close()
+    except Exception:
+        # Kalau gagal kompres (library gak ada / PDF rusak), fallback kirim PDF asli
+        image_parts = [{"mime_type": "application/pdf", "data": pdf_bytes}]
+
     items_text = "\n".join(f"- {it}" for it in items_list)
 
-    prompt = f"""Kamu adalah asisten admin procurement. Baca dokumen PDF quotation/penawaran
+    prompt = f"""Kamu adalah asisten admin procurement. Baca dokumen quotation/penawaran
 vendor berikut ini dengan TELITI (bisa berupa hasil scan atau tulisan tangan, tidak harus rapi).
 Perhatikan khusus untuk ANGKA HARGA — baca digit per digit dengan hati-hati, jangan terburu-buru,
 karena kesalahan baca angka bisa berakibat fatal untuk keputusan pembelian.
@@ -647,7 +664,7 @@ Jawab HANYA dengan JSON array, tanpa markdown/backtick/penjelasan tambahan. Form
 
     try:
         model = genai.GenerativeModel("gemini-flash-latest", generation_config=generation_config)
-        res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
+        res = model.generate_content([prompt] + image_parts)
         raw = (res.text or "").strip()
         raw = re.sub(r"^```json|```$", "", raw, flags=re.MULTILINE).strip()
         parsed = json.loads(raw)
