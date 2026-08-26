@@ -716,7 +716,7 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
     genai.configure(api_key=api_key)
 
     st.markdown("---")
-    st.markdown("### 🤖 AI Procurement Insight & Assistant")
+    st.markdown("### 🤖 AI Procurement Insight")
     
     insight_key = f"ai_insight_{rfq_title}"
     history_key = f"ai_history_{rfq_title}"
@@ -731,53 +731,56 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
         if cost_saving is not None else "Data cost saving tidak tersedia."
     )
 
-    # 1. GENERATE OTOMATIS SAAT HALAMAN DIBUKA
+    # 1. GENERATE HANYA KALAU USER KLIK TOMBOL
     if insight_key not in st.session_state:
-        context_table = df_display.to_csv(index=False)
-        
-        # SYSTEM PROMPT DIPAKSA DI BELAKANG LAYAR
-        prompt = f"""Kamu adalah Procurement Specialist & Cost Analyst untuk TACO Group.
-Analisis data perbandingan penawaran vendor berikut untuk RFQ: {rfq_title}
-
-DATA PERBANDINGAN (kolom "🏆 Rekomendasi" = vendor terbaik per item berdasarkan bobot yang dipilih PIC):
-{context_table}
-
-BOBOT PRIORITAS YANG DIPAKAI PIC SAAT INI: {weights_text}
-{saving_text}
-
-Tugasmu adalah memberikan analisis otomatis tanpa perlu ditanya.
-SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADING & BULLET POINT KONSISTEN):
-
-### ❓Penjelasan Produk:
-(Berikan penjelasan SINGKAT dan PENTING mengenai spesifikasi dan merk produk, tipe, atau jenisnya, dan kegunaannya)
-
-### 💰 Analisis Cost Saving & Trade-off:
-(Jelaskan angka cost saving di atas dengan bahasa manusia — worth it atau tidak. Untuk item-item di mana vendor rekomendasi BUKAN yang termurah, jelaskan trade-off-nya: kenapa vendor itu tetap direkomendasikan meski bukan termurah — misal karena TOP lebih panjang, stock ready, atau lead time lebih cepat. Sebutkan pro & cons konkret per item kalau ada perbedaan berarti.)
-
-### ⚖️ Evaluasi Bobot Prioritas:
-(Komentari apakah bobot yang dipilih PIC saat ini {weights_text} sudah pas untuk RFQ ini. Kalau ada indikasi bobot ini kurang optimal — misal barang urgent tapi bobot lead time kecil, atau nilai RFQ besar tapi bobot harga kecil — sarankan penyesuaian bobot yang lebih masuk akal beserta alasannya.)
-
-### 💡 Rekomendasi Merk Alternative:
-(Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya, atau rekomendasi vendor sesuai lokasi)
-
-### ⚠️ Catatan Penting untuk Procurement:
-(Sorot jika ada vendor yang harganya terindikasi jauh diatas harga pasar/overpriced/typo kuantitas, atau lead time terlalu lama)
-
-### 🎯 Rekomendasi Action Plan PIC:
-(Berikan langkah konkret 1, 2, 3 untuk PIC Procurement, misal: klarifikasi typo, negosiasi target harga, atau minta RFQ ulang merk alternatif. pertimbangkan juga jika barang tersebut dicatat urgent, maka pilih alternatif yang paling sesuai)
-
-Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
-"""
-        with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
-            try:
-                model = genai.GenerativeModel("gemini-flash-latest")
-                res = model.generate_content(prompt)
-                if res and res.text:
-                    st.session_state[insight_key] = res.text
-            except Exception as e:
-                st.session_state[insight_key] = f"⚠️ AI Insight Cooldown / Error: {e}"
-
-    # Tampilkan Hasil Analisis Otomatis
+        st.info("💡 Analisis AI belum dibuat untuk RFQ ini. Klik tombol di bawah untuk generate.")
+        if st.button("🤖 Generate AI Insight", key=f"gen_{rfq_title}", type="primary", use_container_width=True):
+            context_table = df_display.to_csv(index=False)
+    
+            # SYSTEM PROMPT DIPAKSA DI BELAKANG LAYAR
+            prompt = f"""Kamu adalah Procurement Specialist & Cost Analyst untuk TACO Group.
+    Analisis data perbandingan penawaran vendor berikut untuk RFQ: {rfq_title}
+    
+    DATA PERBANDINGAN (kolom "🏆 Rekomendasi" = vendor terbaik per item berdasarkan bobot yang dipilih PIC):
+    {context_table}
+    
+    BOBOT PRIORITAS YANG DIPAKAI PIC SAAT INI: {weights_text}
+    {saving_text}
+    
+    Tugasmu adalah memberikan analisis otomatis tanpa perlu ditanya.
+    SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADING & BULLET POINT KONSISTEN):
+    
+    ### 💰 Analisis Cost Saving & Trade-off:
+    (Jelaskan angka cost saving di atas dengan bahasa manusia — worth it atau tidak. Untuk item-item di mana vendor rekomendasi BUKAN yang termurah, jelaskan trade-off-nya: kenapa vendor itu tetap direkomendasikan meski bukan termurah — misal karena TOP lebih panjang, stock ready, atau lead time lebih cepat. Sebutkan pro & cons konkret per item kalau ada perbedaan berarti.)
+    
+    ### ⚖️ Evaluasi Bobot Prioritas:
+    (Komentari apakah bobot yang dipilih PIC saat ini {weights_text} sudah pas untuk RFQ ini. Kalau ada indikasi bobot ini kurang optimal — misal barang urgent tapi bobot lead time kecil, atau nilai RFQ besar tapi bobot harga kecil — sarankan penyesuaian bobot yang lebih masuk akal beserta alasannya.)
+    
+    ### 💡 Rekomendasi Merk Alternative:
+    (Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya, atau rekomendasi vendor sesuai lokasi)
+    
+    ### ⚠️ Catatan Penting untuk Procurement:
+    (Sorot jika ada vendor yang harganya terindikasi jauh diatas harga pasar/overpriced/typo kuantitas, atau lead time terlalu lama)
+    
+    ### 🎯 Rekomendasi Action Plan PIC:
+    (Berikan langkah konkret 1, 2, 3 untuk PIC Procurement, misal: klarifikasi typo, negosiasi target harga, atau minta RFQ ulang merk alternatif. pertimbangkan juga jika barang tersebut dicatat urgent, maka pilih alternatif yang paling sesuai)
+    
+    Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
+    """
+            with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
+                try:
+                    model = genai.GenerativeModel("gemini-flash-latest")
+                    res = model.generate_content(prompt)
+                    if res and res.text:
+                        st.session_state[insight_key] = res.text
+                        st.rerun()
+                except Exception as e:
+                    if "429" in str(e) or "quota" in str(e).lower():
+                        st.error("⚠️ Kuota AI harian sudah habis. Coba lagi nanti atau hubungi admin.")
+                    else:
+                        st.error(f"⚠️ Gagal generate insight: {e}")
+    
+    # Tampilkan Hasil Analisis (kalau sudah pernah di-generate)
     if insight_key in st.session_state:
         with st.container(border=True):
             st.markdown(st.session_state[insight_key])
