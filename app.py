@@ -634,7 +634,7 @@ Jawab HANYA JSON array tanpa markdown:
             model = genai.GenerativeModel("gemini-2.5-flash", generation_config=generation_config)
             res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
         except Exception:
-            model = genai.GenerativeModel("gemini-2.5-flash", generation_config=generation_config)
+            model = genai.GenerativeModel("gemini-flash-lite-latest", generation_config=generation_config)
             res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
 
         raw = (res.text or "").strip()
@@ -1020,7 +1020,6 @@ def show_login():
                     st.error("Email atau Password salah.")
 
 
-@st.fragment
 def render_pr_list(df_source, already_published):
     """Render list PR + checkbox item, dipakai buat tab Urgent & Normal.
     Dibungkus @st.fragment supaya centang checkbox / Pilih Semua / Hapus Semua
@@ -1042,13 +1041,12 @@ def render_pr_list(df_source, already_published):
             if cA.button("✅ Pilih Semua", key=f"all_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state["selected_items_dict"][k] = True
-                st.rerun(scope="fragment")
-                
-            # Tombol Hapus Semua
+                st.rerun()
+            
             if cB.button("🗑️ Hapus Semua", key=f"none_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state["selected_items_dict"][k] = False
-                st.rerun(scope="fragment")
+                st.rerun()
 
             h1, h2, h3, h4, h5 = st.columns([0.5, 3, 3, 1, 1])
             h1.markdown("**✓**")
