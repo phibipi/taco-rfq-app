@@ -631,10 +631,10 @@ Jawab HANYA JSON array tanpa markdown:
 
     try:
         try:
-            model = genai.GenerativeModel("gemini-flash-lite-latest", generation_config=generation_config)
+            model = genai.GenerativeModel("gemini-2.5-flash", generation_config=generation_config)
             res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
         except Exception:
-            model = genai.GenerativeModel("gemini-flash-latest", generation_config=generation_config)
+            model = genai.GenerativeModel("gemini-2.5-flash", generation_config=generation_config)
             res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
 
         raw = (res.text or "").strip()
@@ -689,9 +689,9 @@ Format jawaban Markdown dengan heading persis seperti ini:
 """
     try:
         try:
-            model = genai.GenerativeModel("gemini-flash-latest", tools=[{"google_search": {}}])
+            model = genai.GenerativeModel("gemini-2.5-flash", tools=[{"google_search": {}}])
         except Exception:
-            model = genai.GenerativeModel("gemini-flash-latest")
+            model = genai.GenerativeModel("gemini-2.5-flash")
         res = model.generate_content(prompt)
         return res.text, None
     except Exception as e:
@@ -769,7 +769,7 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
     """
             with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
                 try:
-                    model = genai.GenerativeModel("gemini-flash-latest")
+                    model = genai.GenerativeModel("gemini-2.5-flash")
                     res = model.generate_content(prompt)
                     if res and res.text:
                         st.session_state[insight_key] = res.text
@@ -808,7 +808,7 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
                 try:
                     context_table = df_display.to_csv(index=False)
                     full_query = f"Data CQR:\n{context_table}\n\nPertanyaan User: {user_prompt}"
-                    model = genai.GenerativeModel("gemini-flash-latest")
+                    model = genai.GenerativeModel("gemini-2.5-flash")
                     response = model.generate_content(full_query)
                     answer = response.text if response else "Maaf, AI tidak dapat merespons."
                     st.markdown(answer)
