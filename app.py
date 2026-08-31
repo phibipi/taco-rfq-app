@@ -2109,15 +2109,26 @@ def admin_portal_register_pic():
             submitted = st.form_submit_button("Simpan PIC Baru", type="primary")
             if submitted:
                 if not p_name or not p_email or "@" not in p_email:
-                    st.error("❌ Nama/Email tidak valid.")
+                    st.session_state["last_pic_single_result"] = {"ok": False, "msg": "❌ Nama/Email tidak valid."}
                 else:
                     auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
                     ok, err = register_user(p_name, p_email, auto_password, "proc")
                     if ok:
-                        st.success(f"🎉 PIC {p_name} berhasil didaftarkan.")
-                        st.info(f"📧 Email: `{p_email}`\n\n🔑 Password: `{auto_password}` — catat & kirim manual ke PIC ybs.")
+                        st.session_state["last_pic_single_result"] = {
+                            "ok": True, "name": p_name, "email": p_email, "password": auto_password,
+                        }
                     else:
-                        st.error(f"❌ Gagal: {err}")
+                        st.session_state["last_pic_single_result"] = {"ok": False, "msg": f"❌ Gagal: {err}"}
+
+        # Tampilkan hasil terakhir (persisten, gak hilang saat rerun lain)
+        result = st.session_state.get("last_pic_single_result")
+        if result:
+            if result["ok"]:
+                st.success(f"🎉 PIC {result['name']} berhasil didaftarkan.")
+                st.info(f"📧 Email: `{result['email']}`\n\n🔑 Password: `{result['password']}` — catat & kirim manual ke PIC ybs.")
+            else:
+                st.error(result["msg"])
+
     with sub2:
         st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email**.")
         bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_pic")
@@ -2126,8 +2137,16 @@ def admin_portal_register_pic():
             st.dataframe(df_bulk, use_container_width=True, hide_index=True)
             if st.button("🚀 Daftarkan Semua PIC Ini", type="primary"):
                 result_df = bulk_register_users(df_bulk, "proc")
-                st.success("Selesai! Cek hasil & password di bawah.")
-                st.dataframe(result_df, use_container_width=True, hide_index=True)
+                st.session_state["last_pic_bulk_result"] = result_df
+
+        bulk_result = st.session_state.get("last_pic_bulk_result")
+        if bulk_result is not None and not bulk_result.empty:
+            st.success("Selesai! Cek hasil, email & password di bawah.")
+            st.dataframe(
+                bulk_result[["name", "email", "password", "status"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def admin_portal_register_vendor():
@@ -2140,15 +2159,26 @@ def admin_portal_register_vendor():
             submitted = st.form_submit_button("Simpan Vendor Baru", type="primary")
             if submitted:
                 if not v_name or not v_email or "@" not in v_email:
-                    st.error("❌ Nama/Email tidak valid.")
+                    st.session_state["last_vendor_single_result"] = {"ok": False, "msg": "❌ Nama/Email tidak valid."}
                 else:
                     auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
                     ok, err = register_user(v_name, v_email, auto_password, "vendor")
                     if ok:
-                        st.success(f"🎉 Vendor {v_name} berhasil didaftarkan.")
-                        st.info(f"🔑 Password: `{auto_password}` — catat & kirim manual ke vendor ybs.")
+                        st.session_state["last_vendor_single_result"] = {"ok": True, "name": v_name}
                     else:
-                        st.error(f"❌ Gagal: {err}")
+                        st.session_state["last_vendor_single_result"] = {"ok": False, "msg": f"❌ Gagal: {err}"}
+
+        result = st.session_state.get("last_vendor_single_result")
+        if result:
+            if result["ok"]:
+                st.success(
+                    f"🎉 Vendor {result['name']} berhasil didaftarkan. "
+                    "Password akan otomatis disertakan saat Anda mengirim undangan RFQ pertama ke vendor ini "
+                    "(centang opsi 'Reset & sertakan password' di halaman Import PR List)."
+                )
+            else:
+                st.error(result["msg"])
+
     with sub2:
         st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email**.")
         bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_vendor")
@@ -2157,8 +2187,16 @@ def admin_portal_register_vendor():
             st.dataframe(df_bulk, use_container_width=True, hide_index=True)
             if st.button("🚀 Daftarkan Semua Vendor Ini", type="primary"):
                 result_df = bulk_register_users(df_bulk, "vendor")
-                st.success("Selesai! Cek hasil & password di bawah.")
-                st.dataframe(result_df, use_container_width=True, hide_index=True)
+                # Simpan cuma nama, email, status -- password TIDAK disimpan/ditampilkan di sini
+                st.session_state["last_vendor_bulk_result"] = result_df[["name", "email", "status"]]
+
+        bulk_result = st.session_state.get("last_vendor_bulk_result")
+        if bulk_result is not None and not bulk_result.empty:
+            st.success(
+                "Selesai! Vendor berhasil didaftarkan. Password akan otomatis disertakan "
+                "saat Anda mengirim undangan RFQ pertama ke masing-masing vendor."
+            )
+            st.dataframe(bulk_result, use_container_width=True, hide_index=True)
 
 
 def admin_portal_user_list():
