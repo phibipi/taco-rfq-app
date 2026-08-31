@@ -115,14 +115,14 @@ def send_pic_welcome_email(pic_name, pic_email, password):
     if not sender_password or not sender_email:
         return False
 
-    subject = "🎉 Akun Portal Procurement TACO Anda Telah Aktif"
+    subject = "🎉 Akun Portal Procurement TACO Telah Aktif"
     body = (
         f"Dear {pic_name},\n\n"
         f"Akun Anda untuk Portal TACO Procurement telah berhasil dibuat.\n\n"
         f"🌐 Link Portal: https://taco-rfq.streamlit.app/\n"
         f"👤 Username/Email: {pic_email}\n"
         f"🔑 Password: {password}\n\n"
-        f"Silakan login ke portal dan segera amankan/kelola RFQ Anda.\n\n"
+        f"Silakan login ke portal untuk mengelola RFQ.\n\n"
         f"Salam,\nTACO Procurement Team"
     )
 
@@ -1858,7 +1858,7 @@ def proc_portal_comparison():
         st.header("📊 Monitoring & Price Comparison")
 
         if df_pr.empty:
-            st.info("Belum ada data RFQ yang dipublish oleh Anda.")
+            st.info("Belum ada data RFQ")
         else:
             st.write("Pilih salah satu RFQ di bawah untuk membuka **Halaman Detail Perbandingan**:")
 
@@ -2320,15 +2320,24 @@ def admin_portal_user_list():
 
 def admin_portal_reset_password():
     st.header("🔑 Reset Password User")
-    df_proc = get_users_by_role("proc")
-    df_vend = get_vendors()
-    df_all = pd.concat([df_proc, df_vend], ignore_index=True) if not df_proc.empty or not df_vend.empty else pd.DataFrame()
+    
+    current_user = st.session_state["user_info"]
+    current_role = current_user.get("role", "proc")
+
+    # Filter daftar user yang bisa di-reset berdasarkan role login
+    if current_role == "admin":
+        df_proc = get_users_by_role("proc")
+        df_vend = get_vendors()
+        df_all = pd.concat([df_proc, df_vend], ignore_index=True) if not df_proc.empty or not df_vend.empty else pd.DataFrame()
+    else:
+        # PIC Procurement biasa HANYA BISA reset password VENDOR
+        df_all = get_vendors()
 
     if df_all.empty:
-        st.info("Belum ada user terdaftar.")
+        st.info("Belum ada user/vendor yang terdaftar.")
     else:
         df_all["label"] = df_all["vendor_name"].fillna("-") + " (" + df_all["email"] + ") — " + df_all["role"]
-        sel_label = st.selectbox("Pilih User:", df_all["label"])
+        sel_label = st.selectbox("Pilih User / Vendor:", df_all["label"])
         sel_row = df_all[df_all["label"] == sel_label].iloc[0]
 
         mode = st.radio("Password baru:", ["Generate otomatis (random)", "Ketik manual"])
@@ -2342,7 +2351,7 @@ def admin_portal_reset_password():
                 ok, err = reset_user_password(sel_row["id"], final_pw)
                 if ok:
                     st.success(f"🎉 Password untuk **{sel_row['email']}** berhasil direset.")
-                    st.info(f"🔑 Password baru: `{final_pw}`")
+                    st.info(f"🔑 Password baru: `{final_pw}` — berikan password ini ke vendor bersangkutan.")
                 else:
                     st.error(f"❌ Gagal: {err}")
 
@@ -2735,7 +2744,13 @@ def vendor_portal(vendor_id):
 # =====================================================================
 # COMBINED ADMIN PORTAL (CUSTOM BUTTON SIDEBAR UI)
 # =====================================================================
+# =====================================================================
+# COMBINED ADMIN & PROC PORTAL (UPDATED PERMISSION MENU)
+# =====================================================================
 def combined_admin_portal():
+    current_user = st.session_state["user_info"]
+    current_role = current_user.get("role", "proc")
+
     if "current_page" not in st.session_state:
         st.session_state["current_page"] = "📥 Import PR List"
 
@@ -2743,23 +2758,27 @@ def combined_admin_portal():
     st.sidebar.markdown("## 🧭 Navigasi Menu")
     st.sidebar.markdown("---")
 
+    # 1. MENU UMUM (Bisa diakses PIC Procurement & Admin)
     menu_options = [
         ("📥 Import PR List", "proc_import"),
         ("📊 Price Comparison", "proc_compare"),
         ("✍️ Input Manual (as Vendor)", "proc_manual"),
         ("🧮 AI Cost Estimator", "proc_estimator"),
         ("🔍 History RFQ", "proc_history"),
-        ("➕ Daftarkan PIC", "admin_pic"),
-        ("➕ Daftarkan Vendor", "admin_vendor"),
-        ("👥 Daftar User", "admin_users"),
-        ("🔑 Reset Password", "admin_reset"),
+        ("➕ Daftarkan Vendor", "admin_vendor"),      # ← PIC & Admin bisa daftarkan vendor
+        ("🔑 Reset Password", "admin_reset"),         # ← PIC & Admin bisa reset password
     ]
+
+    # 2. MENU KHUSUS SUPER ADMIN (Hanya Role 'admin')
+    if current_role == "admin":
+        menu_options.extend([
+            ("➕ Daftarkan PIC", "admin_pic"),        # ← Khusus Admin
+            ("👥 Daftar User", "admin_users"),         # ← Khusus Admin
+        ])
 
     # Render Setiap Menu Sebagai Tombol Custom
     for label, page_id in menu_options:
         is_active = (st.session_state["current_page"] == label)
-        
-        # Tombol diberi tipe 'primary' jika halaman sedang aktif biar kelihatan beda & cakep
         btn_type = "primary" if is_active else "secondary"
         
         if st.sidebar.button(label, key=f"nav_btn_{page_id}", type=btn_type, use_container_width=True):
@@ -2775,20 +2794,20 @@ def combined_admin_portal():
         proc_portal_import()
     elif selected_page == "📊 Price Comparison":
         proc_portal_comparison()
-    elif selected_page == "✍️ Input Manual (as Vendor)":   # ← baris baru
+    elif selected_page == "✍️ Input Manual (as Vendor)":
         proc_portal_manual_input()
     elif selected_page == "🧮 AI Cost Estimator":
         proc_portal_cost_estimator()
     elif selected_page == "🔍 History RFQ":
         proc_portal_history()
-    elif selected_page == "➕ Daftarkan PIC":
-        admin_portal_register_pic()
     elif selected_page == "➕ Daftarkan Vendor":
         admin_portal_register_vendor()
-    elif selected_page == "👥 Daftar User":
-        admin_portal_user_list()
     elif selected_page == "🔑 Reset Password":
         admin_portal_reset_password()
+    elif selected_page == "➕ Daftarkan PIC" and current_role == "admin":
+        admin_portal_register_pic()
+    elif selected_page == "👥 Daftar User" and current_role == "admin":
+        admin_portal_user_list()
 
 
 def main():
