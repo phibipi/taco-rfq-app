@@ -545,7 +545,7 @@ def request_nego(pr_id, vendor_ids, note=""):
 # EMAIL (UPDATED: JUDUL RFQ)
 # =====================================================================
 def send_rfq_email(vendor_email, vendor_name, rfq_title, deadline_str, items_text,
-                   delivery_type, pic_notes, files):
+                   delivery_type, pic_notes, files, vendor_password=None):
     if "email_config" not in st.secrets:
         st.error("Konfigurasi 'email_config' tidak ditemukan di st.secrets")
         return False
@@ -557,7 +557,13 @@ def send_rfq_email(vendor_email, vendor_name, rfq_title, deadline_str, items_tex
         return False
 
     subject = f"Request for Quotation - TACO - {datetime.now().strftime('%d %b %Y')}"
-    
+
+    login_info = (
+        f"\n🔐 Info Login Anda:\nEmail: {vendor_email}\nPassword: {vendor_password}\n"
+        f"(Mohon segera login dan simpan baik-baik password ini)\n\n"
+        if vendor_password else ""
+    )
+
     # FIX: "No. PR" diganti menjadi "Judul RFQ"
     body = (
         f"Dear {vendor_name},\n\n"
@@ -567,6 +573,7 @@ def send_rfq_email(vendor_email, vendor_name, rfq_title, deadline_str, items_tex
         f"Metode Pengiriman: {delivery_type}\n"
         f"Catatan Tambahan PIC: {pic_notes if pic_notes else '-'}\n\n"
         f"Daftar Item:\n{items_text}\n\n"
+        f"{login_info}"
         f"Silakan login ke portal: https://taco-rfq.streamlit.app/\n\n"
         f"Salam,\nTACO Procurement Team"
     )
@@ -1250,6 +1257,9 @@ def proc_portal_import():
                 delivery_type_val = st.radio("🚚 Metode Pengiriman:", ["Franco (Kirim ke lokasi)", "Loco (Pengambilan sendiri)"])
             with c_right:
                 pic_notes_val = st.text_area("📝 Catatan Tambahan Khusus Vendor:")
+                reset_pw_on_send = st.checkbox(
+                    "🔐 Reset & sertakan password login di email undangan (untuk vendor yang belum bisa login / lupa password)"
+                )
 
             if st.button("🚀 Publish Undangan RFQ", type="primary", use_container_width=True):
                 if not rfq_title_val:
@@ -1274,11 +1284,23 @@ def proc_portal_import():
 
                     with st.spinner("Mengirim notifikasi email ke vendor..."):
                         for v_name in sel_v_names:
-                            v_email = df_v[df_v["vendor_name"] == v_name]["email"].iloc[0]
+                            v_row = df_v[df_v["vendor_name"] == v_name].iloc[0]
+                            v_email = v_row["email"]
+                            v_id = v_row["id"]
+            
+                            new_password = None
+                            if reset_pw_on_send:
+                                new_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                                ok_reset, err_reset = reset_user_password(v_id, new_password)
+                                if not ok_reset:
+                                    st.warning(f"⚠️ Gagal reset password untuk {v_name}: {err_reset}")
+                                    new_password = None
+            
                             send_rfq_email(
                                 v_email, v_name, rfq_title_val,
                                 rfq_deadline_val.strftime("%d %b %Y"), items_text_email,
                                 delivery_type_val, pic_notes_val, attached_files or [],
+                                vendor_password=new_password,
                             )
 
                     # POIN 5: Notifikasi Sukses Terkirim
