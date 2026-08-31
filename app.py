@@ -103,33 +103,86 @@ def delete_session(token):
         pass
 
 
-def register_user(name, email, password, role):
-    """role: 'admin', 'proc', atau 'vendor'"""
+# =====================================================================
+# AUTH & REGISTRATION UPDATED
+# =====================================================================
+def send_pic_welcome_email(pic_name, pic_email, password):
+    """Kirim email pemberitahuan akun baru khusus untuk PIC Procurement."""
+    if "email_config" not in st.secrets:
+        return False
+    sender_email = st.secrets["email_config"].get("smtp_user", "")
+    sender_password = st.secrets["email_config"].get("smtp_password", "")
+    if not sender_password or not sender_email:
+        return False
+
+    subject = "🎉 Akun Portal Procurement TACO Anda Telah Aktif"
+    body = (
+        f"Dear {pic_name},\n\n"
+        f"Akun Anda untuk Portal TACO Procurement telah berhasil dibuat.\n\n"
+        f"🌐 Link Portal: https://taco-rfq.streamlit.app/\n"
+        f"👤 Username/Email: {pic_email}\n"
+        f"🔑 Password: {password}\n\n"
+        f"Silakan login ke portal dan segera amankan/kelola RFQ Anda.\n\n"
+        f"Salam,\nTACO Procurement Team"
+    )
+
     try:
-        existing = sb.table("profiles").select("id").eq("email", email).execute()
+        msg = MIMEMultipart()
+        msg["From"] = sender_email
+        msg["To"] = pic_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, pic_email, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        st.warning(f"⚠️ Gagal mengirim email login ke PIC {pic_email}: {e}")
+        return False
+
+
+def register_user(name, email_input, password, role):
+    """
+    role: 'admin', 'proc', atau 'vendor'
+    Untuk vendor: email_input bisa berisi multi-email dipisah ';' (misal: "a@v.com; b@v.com").
+    Email PERTAMA dipakai sebagai auth login utama Supabase.
+    """
+    try:
+        raw_email_str = str(email_input).strip()
+        # Ambil email pertama untuk username login Supabase
+        emails_list = [e.strip().lower() for e in raw_email_str.split(";") if e.strip()]
+        if not emails_list:
+            return False, "Email tidak valid."
+
+        primary_email = emails_list[0]
+
+        existing = sb.table("profiles").select("id").eq("email", primary_email).execute()
         if existing.data:
-            return False, "Email sudah terdaftar."
+            return False, f"Email utama ({primary_email}) sudah terdaftar."
+
         created = sb.auth.admin.create_user(
-            {"email": email, "password": password, "email_confirm": True}
+            {"email": primary_email, "password": password, "email_confirm": True}
         )
         uid = created.user.id
+        
+        # Simpan raw_email_str (semua email dipisah ';') ke DB profile agar saat RFQ bisa dikirim ke semua
         sb.table("profiles").insert(
-            {"id": uid, "email": email, "role": role, "vendor_name": name}
+            {"id": uid, "email": raw_email_str, "role": role, "vendor_name": name}
         ).execute()
+
+        # Jika yang didaftarkan adalah PIC Procurement, LANGSUNG kirim email info login
+        if role == "proc":
+            send_pic_welcome_email(name, primary_email, password)
+
         return True, None
     except Exception as e:
         return False, str(e)
 
 
 def bulk_register_users(df, role):
-    """
-    df harus punya kolom 'name' dan 'email' (case-insensitive).
-    Password di-generate random per baris.
-    Return: DataFrame hasil (name, email, password, status)
-    """
-    import random
-    import string
-
     df.columns = [str(c).strip().lower() for c in df.columns]
     results = []
     for _, row in df.iterrows():
@@ -145,6 +198,73 @@ def bulk_register_users(df, role):
         else:
             results.append({"name": name, "email": email, "password": "-", "status": f"❌ {err}"})
     return pd.DataFrame(results)
+
+
+def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items_text,
+                   delivery_type, pic_notes, files, vendor_password=None):
+    """Kirim email RFQ ke SELURUH email vendor (bisa multi-email dipisah ';')."""
+    if "email_config" not in st.secrets:
+        st.error("Konfigurasi 'email_config' tidak ditemukan di st.secrets")
+        return False
+
+    sender_email = st.secrets["email_config"].get("smtp_user", "")
+    sender_password = st.secrets["email_config"].get("smtp_password", "")
+    if not sender_password:
+        st.error("'smtp_password' masih kosong di st.secrets")
+        return False
+
+    # Pecah daftar email (pisahkan berdasarkan ';')
+    recipients = [e.strip().lower() for e in str(vendor_email_str).split(";") if e.strip()]
+    if not recipients:
+        return False
+
+    primary_email = recipients[0]
+    subject = f"Request for Quotation - TACO - {datetime.now().strftime('%d %b %Y')}"
+
+    login_info = (
+        f"\n🔐 Info Login Portal Anda:\n"
+        f"Username (Email Utama): {primary_email}\n"
+        f"Password: {vendor_password}\n"
+        f"(Mohon simpan baik-baik password ini untuk login ke portal)\n\n"
+        if vendor_password else ""
+    )
+
+    body = (
+        f"Dear {vendor_name},\n\n"
+        f"Kami mengundang Anda untuk mengisi Request for Quotation (RFQ):\n\n"
+        f"Judul RFQ: {rfq_title}\n"
+        f"Batas Waktu Pengisian: {deadline_str}\n"
+        f"Metode Pengiriman: {delivery_type}\n"
+        f"Catatan Tambahan PIC: {pic_notes if pic_notes else '-'}\n\n"
+        f"Daftar Item:\n{items_text}\n\n"
+        f"{login_info}"
+        f"Silakan login ke portal: https://taco-rfq.streamlit.app/\n\n"
+        f"Salam,\nTACO Procurement Team"
+    )
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = sender_email
+        msg["To"] = ", ".join(recipients)  # Kirim sekaligus ke semua email vendor
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+
+        for f in files:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.getvalue())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", f"attachment; filename={f.name}")
+            msg.attach(part)
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, recipients, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        st.warning(f"⚠️ Notifikasi email gagal terkirim ke {vendor_email_str}: {e}")
+        return False
 
 
 def get_users_by_role(role):
@@ -2160,12 +2280,14 @@ def admin_portal_register_pic():
 
 
 def admin_portal_register_vendor():
-    st.header("➕ Daftarkan Vendor")
+    st.header("➕ Daftarkan Vendor Baru")
+    st.caption("💡 Masukkan nama vendor & email. Jika lebih dari 1 email, pisahkan dengan tanda titik koma (`;`). Email pertama akan menjadi Username Login utama vendor.")
+    
     sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
     with sub1:
         with st.form("form_register_vendor", clear_on_submit=True):
-            v_name = st.text_input("Nama Vendor").strip()
-            v_email = st.text_input("Email Vendor").strip().lower()
+            v_name = st.text_input("Nama Vendor", placeholder="Contoh: PT. Maju Jaya").strip()
+            v_email = st.text_input("Email Vendor (opsional multi-email pisah ';')", placeholder="Contoh: sales@vendor.com; admin@vendor.com").strip().lower()
             submitted = st.form_submit_button("Simpan Vendor Baru", type="primary")
             if submitted:
                 if not v_name or not v_email or "@" not in v_email:
@@ -2182,30 +2304,25 @@ def admin_portal_register_vendor():
         if result:
             if result["ok"]:
                 st.success(
-                    f"🎉 Vendor {result['name']} berhasil didaftarkan. "
-                    "Password akan otomatis disertakan saat Anda mengirim undangan RFQ pertama ke vendor ini "
-                    "(centang opsi 'Reset & sertakan password' di halaman Import PR List)."
+                    f"🎉 Vendor **{result['name']}** berhasil didaftarkan! "
+                    "Email notifikasi login **belum dikirimkan** sekarang, dan akan otomatis dikirimkan saat Anda menerbitkan undangan RFQ pertama kali."
                 )
             else:
                 st.error(result["msg"])
 
     with sub2:
-        st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email**.")
+        st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email** (bisa dipisah `;` di kolom email).")
         bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_vendor")
         if bulk_file is not None:
             df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
             st.dataframe(df_bulk, use_container_width=True, hide_index=True)
             if st.button("🚀 Daftarkan Semua Vendor Ini", type="primary"):
                 result_df = bulk_register_users(df_bulk, "vendor")
-                # Simpan cuma nama, email, status -- password TIDAK disimpan/ditampilkan di sini
                 st.session_state["last_vendor_bulk_result"] = result_df[["name", "email", "status"]]
 
         bulk_result = st.session_state.get("last_vendor_bulk_result")
         if bulk_result is not None and not bulk_result.empty:
-            st.success(
-                "Selesai! Vendor berhasil didaftarkan. Password akan otomatis disertakan "
-                "saat Anda mengirim undangan RFQ pertama ke masing-masing vendor."
-            )
+            st.success("Selesai! Vendor berhasil didaftarkan tanpa pengiriman email awal.")
             st.dataframe(bulk_result, use_container_width=True, hide_index=True)
 
 
