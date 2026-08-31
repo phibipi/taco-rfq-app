@@ -2106,16 +2106,26 @@ def admin_portal_register_pic():
         with st.form("form_register_pic", clear_on_submit=True):
             p_name = st.text_input("Nama PIC").strip()
             p_email = st.text_input("Email PIC").strip().lower()
+            pw_mode = st.radio("Password:", ["Generate otomatis (random)", "Ketik manual"], key="pic_pw_mode")
+            p_password_manual = (
+                st.text_input("Password (min. 6 karakter):", type="password", key="pic_pw_manual")
+                if pw_mode == "Ketik manual" else None
+            )
             submitted = st.form_submit_button("Simpan PIC Baru", type="primary")
             if submitted:
                 if not p_name or not p_email or "@" not in p_email:
                     st.session_state["last_pic_single_result"] = {"ok": False, "msg": "❌ Nama/Email tidak valid."}
+                elif pw_mode == "Ketik manual" and (not p_password_manual or len(p_password_manual) < 6):
+                    st.session_state["last_pic_single_result"] = {"ok": False, "msg": "❌ Password minimal 6 karakter."}
                 else:
-                    auto_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-                    ok, err = register_user(p_name, p_email, auto_password, "proc")
+                    final_password = (
+                        p_password_manual if pw_mode == "Ketik manual"
+                        else "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                    )
+                    ok, err = register_user(p_name, p_email, final_password, "proc")
                     if ok:
                         st.session_state["last_pic_single_result"] = {
-                            "ok": True, "name": p_name, "email": p_email, "password": auto_password,
+                            "ok": True, "name": p_name, "email": p_email, "password": final_password,
                         }
                     else:
                         st.session_state["last_pic_single_result"] = {"ok": False, "msg": f"❌ Gagal: {err}"}
