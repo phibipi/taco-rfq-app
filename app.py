@@ -2353,24 +2353,17 @@ def admin_portal_user_list():
 
 
 def admin_portal_reset_password():
-    st.header("🔑 Reset Password User")
+    st.header("🔑 Reset Password User (Admin Only)")
     
-    current_user = st.session_state["user_info"]
-    current_role = current_user.get("role", "proc")
-
-    # Filter daftar user yang bisa di-reset berdasarkan role login
-    if current_role == "admin":
-        df_proc = get_users_by_role("proc")
-        df_vend = get_vendors()
-        df_all = pd.concat([df_proc, df_vend], ignore_index=True) if not df_proc.empty or not df_vend.empty else pd.DataFrame()
-    else:
-        # PIC Procurement biasa HANYA BISA reset password VENDOR
-        df_all = get_vendors()
+    # Khusus Admin: Ambil semua PIC dan Vendor
+    df_proc = get_users_by_role("proc")
+    df_vend = get_vendors()
+    df_all = pd.concat([df_proc, df_vend], ignore_index=True) if not df_proc.empty or not df_vend.empty else pd.DataFrame()
 
     if df_all.empty:
-        st.info("Belum ada user/vendor yang terdaftar.")
+        st.info("Belum ada user terdaftar.")
     else:
-        df_all["label"] = df_all["vendor_name"].fillna("-") + " (" + df_all["email"] + ") — " + df_all["role"]
+        df_all["label"] = df_all["vendor_name"].fillna("-") + " (" + df_all["email"] + ") — " + df_all["role"].str.upper()
         sel_label = st.selectbox("Pilih User / Vendor:", df_all["label"])
         sel_row = df_all[df_all["label"] == sel_label].iloc[0]
 
@@ -2385,7 +2378,7 @@ def admin_portal_reset_password():
                 ok, err = reset_user_password(sel_row["id"], final_pw)
                 if ok:
                     st.success(f"🎉 Password untuk **{sel_row['email']}** berhasil direset.")
-                    st.info(f"🔑 Password baru: `{final_pw}` — berikan password ini ke vendor bersangkutan.")
+                    st.info(f"🔑 Password baru: `{final_pw}` — silakan berikan password ini kepada user bersangkutan.")
                 else:
                     st.error(f"❌ Gagal: {err}")
 
@@ -2775,11 +2768,9 @@ def vendor_portal(vendor_id):
             st.dataframe(pd.DataFrame(rows_h), hide_index=True, use_container_width=True)
 
 
+
 # =====================================================================
-# COMBINED ADMIN PORTAL (CUSTOM BUTTON SIDEBAR UI)
-# =====================================================================
-# =====================================================================
-# COMBINED ADMIN & PROC PORTAL (UPDATED PERMISSION MENU)
+# COMBINED ADMIN & PROC PORTAL (PERMISSIONS UPDATED TO ADMIN-ONLY)
 # =====================================================================
 def combined_admin_portal():
     current_user = st.session_state["user_info"]
@@ -2792,22 +2783,22 @@ def combined_admin_portal():
     st.sidebar.markdown("## 🧭 Navigasi Menu")
     st.sidebar.markdown("---")
 
-    # 1. MENU UMUM (Bisa diakses PIC Procurement & Admin)
+    # 1. MENU UNTUK PIC PROCUREMENT & ADMIN
     menu_options = [
         ("📥 Import PR List", "proc_import"),
         ("📊 Price Comparison", "proc_compare"),
         ("✍️ Input Manual (as Vendor)", "proc_manual"),
         ("🧮 AI Cost Estimator", "proc_estimator"),
         ("🔍 History RFQ", "proc_history"),
-        ("➕ Daftarkan Vendor", "admin_vendor"),      # ← PIC & Admin bisa daftarkan vendor
-        ("🔑 Reset Password", "admin_reset"),         # ← PIC & Admin bisa reset password
     ]
 
-    # 2. MENU KHUSUS SUPER ADMIN (Hanya Role 'admin')
+    # 2. MENU KHUSUS ADMIN (Daftar Vendor, PIC, User List & Reset Password)
     if current_role == "admin":
         menu_options.extend([
-            ("➕ Daftarkan PIC", "admin_pic"),        # ← Khusus Admin
-            ("👥 Daftar User", "admin_users"),         # ← Khusus Admin
+            ("➕ Daftarkan Vendor", "admin_vendor"),
+            ("➕ Daftarkan PIC", "admin_pic"),
+            ("🔑 Reset Password", "admin_reset"),
+            ("👥 Daftar User", "admin_users"),
         ])
 
     # Render Setiap Menu Sebagai Tombol Custom
@@ -2834,12 +2825,12 @@ def combined_admin_portal():
         proc_portal_cost_estimator()
     elif selected_page == "🔍 History RFQ":
         proc_portal_history()
-    elif selected_page == "➕ Daftarkan Vendor":
+    elif selected_page == "➕ Daftarkan Vendor" and current_role == "admin":
         admin_portal_register_vendor()
-    elif selected_page == "🔑 Reset Password":
-        admin_portal_reset_password()
     elif selected_page == "➕ Daftarkan PIC" and current_role == "admin":
         admin_portal_register_pic()
+    elif selected_page == "🔑 Reset Password" and current_role == "admin":
+        admin_portal_reset_password()
     elif selected_page == "👥 Daftar User" and current_role == "admin":
         admin_portal_user_list()
 
