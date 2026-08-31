@@ -1433,22 +1433,34 @@ def proc_portal_import():
 # =====================================================================
 # UI: PROC - MONITORING & COMPARISON (UPDATED)
 # =====================================================================
+# =====================================================================
+# UI: PROC - MONITORING & COMPARISON (UPDATED WITH PRIVACY FILTER)
+# =====================================================================
 def proc_portal_comparison():
+    current_user = st.session_state["user_info"]
+    current_user_id = current_user["id"]
+    current_role = current_user.get("role", "proc")
+
+    # 1. FILTER DATA PR SESUAI USER YANG LOGIN
     try:
-        res_pr = sb.table("purchase_requests").select(
-            "id, pr_code, location, priority_status, rfq_title, uploaded_at"
-        ).execute()
+        query = sb.table("purchase_requests").select(
+            "id, pr_code, location, priority_status, rfq_title, uploaded_at, uploaded_by"
+        )
+        # Jika BUKAN Super Admin (misal PIC Proc biasa), FILTER hanya PR buatan dia sendiri
+        if current_role != "admin":
+            query = query.eq("uploaded_by", current_user_id)
+            
+        res_pr = query.execute()
         df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
     except Exception:
-        # Fallback: kolom uploaded_at belum ada di DB.
-        # App tetap jalan, cuma sort-by-newest gak aktif dulu.
-        st.warning(
-            "⚠️ Kolom `uploaded_at` belum ada di tabel `purchase_requests`. "
-            "List tetap ditampilkan, cuma belum terurut berdasarkan yang terbaru."
+        # Fallback jika uploaded_at belum ada
+        query = sb.table("purchase_requests").select(
+            "id, pr_code, location, priority_status, rfq_title, uploaded_by"
         )
-        res_pr = sb.table("purchase_requests").select(
-            "id, pr_code, location, priority_status, rfq_title"
-        ).execute()
+        if current_role != "admin":
+            query = query.eq("uploaded_by", current_user_id)
+            
+        res_pr = query.execute()
         df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
         if not df_pr.empty:
             df_pr["uploaded_at"] = None
@@ -1471,7 +1483,7 @@ def proc_portal_comparison():
         st.markdown("---")
         st.subheader("📋 Matrix Perbandingan Penawaran Vendor")
 
-        # POIN 8: Filter Prioritas Pemilihan Vendor
+        # Prioritas Pemilihan Vendor
         st.markdown("##### 🎯 Prioritas Pemilihan Vendor:")
         sort_priority = st.radio(
             "Urutkan & Prioritaskan Berdasarkan:",
@@ -1487,20 +1499,17 @@ def proc_portal_comparison():
         }
         w_price, w_top, w_stock, w_leadtime = weight_presets[sort_priority]
         
-        # Key unik per RFQ biar slider gak nyampur antar RFQ
         k_price = f"w_price_ss_{active_id}"
         k_top = f"w_top_ss_{active_id}"
         k_stock = f"w_stock_ss_{active_id}"
         k_leadtime = f"w_leadtime_ss_{active_id}"
         weight_keys = [k_price, k_top, k_stock, k_leadtime]
         
-        # Reset slider ke nilai preset setiap kali preset dropdown berubah
         if st.session_state.get(f"last_preset_{active_id}") != sort_priority:
             st.session_state[k_price], st.session_state[k_top], st.session_state[k_stock], st.session_state[k_leadtime] = weight_presets[sort_priority]
             st.session_state[f"last_preset_{active_id}"] = sort_priority
         
         def _rebalance_weights(changed_key):
-            """Callback: kalau satu slider digeser, sisa bobotnya didistribusikan proporsional ke slider lain supaya total tetap 100."""
             total = sum(st.session_state[k] for k in weight_keys)
             diff = 100 - total
             if diff == 0:
@@ -1515,7 +1524,6 @@ def proc_portal_comparison():
                 for k in others:
                     proportion = st.session_state[k] / others_total
                     st.session_state[k] = max(0, min(100, round(st.session_state[k] + diff * proportion)))
-            # Rapikan sisa pembulatan biar totalnya pas 100
             remainder = 100 - sum(st.session_state[k] for k in weight_keys)
             if remainder != 0:
                 st.session_state[others[-1]] = max(0, min(100, st.session_state[others[-1]] + remainder))
@@ -1536,11 +1544,8 @@ def proc_portal_comparison():
         
         st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Ready Stock {w_stock}% · Lead Time {w_leadtime}%")
 
-        # Query data quotes & assignments untuk CQR Matrix Format
         raw_q = sb.table("quotes").select("*, rfq_assignments(*, pr_items(*), profiles(*))").execute()
 
-        # Ambil quote yang relevan buat RFQ ini dulu, lalu tentukan ROUND TERBARU per assignment
-        # (biar kalau ada nego, yang dipakai buat perbandingan utama = penawaran terakhir/final)
         relevant_quotes = []
         max_round_per_assignment = {}
         for q in raw_q.data or []:
@@ -1555,7 +1560,7 @@ def proc_portal_comparison():
                 max_round_per_assignment[ass_id] = max(max_round_per_assignment.get(ass_id, 1), q_round)
 
         data_matrix = []
-        first_quote_lookup = {}  # (item_id, vendor) -> harga round pertama, buat perbandingan sebelum/sesudah nego
+        first_quote_lookup = {}
         vendors_in_pr = set()
         vendor_id_to_name = {}
         any_nego_happened = False
@@ -1569,13 +1574,11 @@ def proc_portal_comparison():
             q_round = q.get("round") or 1
             item_id = item.get("id")
 
-            # Simpan harga round pertama buat pembanding, apapun round-nya sekarang
             if q_round == 1:
                 first_quote_lookup[(item_id, v_name)] = q.get("unit_price", 0)
             if max_round_per_assignment.get(ass_id, 1) > 1:
                 any_nego_happened = True
 
-            # Matrix utama HANYA pakai quote dari round terbaru per assignment
             if q_round != max_round_per_assignment.get(ass_id, 1):
                 continue
 
@@ -1583,7 +1586,6 @@ def proc_portal_comparison():
             if v_profile.get("id"):
                 vendor_id_to_name[v_profile["id"]] = v_name
 
-            # Concat Description 1 + Description 2
             d1 = str(item.get("description") or "").strip()
             d2 = str(item.get("description2") or "").strip()
             full_item_name = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
@@ -1613,13 +1615,12 @@ def proc_portal_comparison():
             df_m = pd.DataFrame(data_matrix)
             vendor_list_sorted = sorted(list(vendors_in_pr))
 
-            # Barang unik jadi baris
             pivot_items = df_m[["item_id", "Barang", "Qty", "UOM"]].drop_duplicates(subset=["Barang"]).reset_index(drop=True)
 
-            price_lookup = {}   # (barang, vendor) -> harga numeric, buat highlight
-            recommended_vendor_per_item = {}  # barang -> nama vendor terbaik
+            price_lookup = {}
+            recommended_vendor_per_item = {}
             recommended_total = 0
-            worst_case_total = 0  # kalau PIC apes milih vendor termahal di tiap item, buat baseline saving
+            worst_case_total = 0
 
             for idx, r in pivot_items.iterrows():
                 rows_for_item = df_m[df_m["Barang"] == r["Barang"]].copy()
@@ -1639,7 +1640,6 @@ def proc_portal_comparison():
                     match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == v)]
                     price_lookup[(r["Barang"], v)] = float(match.iloc[0]["price"]) if not match.empty else None
 
-            # Susun tabel tampilan: per vendor -> Price/Unit & Total Price (mirip format CQR)
             display_df = pivot_items.drop(columns=["item_id"]).copy()
             for v in vendor_list_sorted:
                 price_col, total_col = [], []
@@ -1657,7 +1657,6 @@ def proc_portal_comparison():
 
             display_df["🏆 Rekomendasi"] = display_df["Barang"].map(recommended_vendor_per_item).fillna("-")
 
-            # Baris Grand Total di bawah (khusus kolom Total per vendor)
             grand_total_row = {"Barang": "GRAND TOTAL", "Qty": "", "UOM": ""}
             for v in vendor_list_sorted:
                 vendor_total = df_m[df_m["vendor"] == v]["total"].sum()
@@ -1666,7 +1665,6 @@ def proc_portal_comparison():
             grand_total_row["🏆 Rekomendasi"] = f"Rp {recommended_total:,.0f}".replace(",", ".")
             display_df = pd.concat([display_df, pd.DataFrame([grand_total_row])], ignore_index=True)
 
-            # Styling: highlight sel harga vendor yang direkomendasikan per baris item (hijau)
             def highlight_recommended_cells(row):
                 styles = [""] * len(row)
                 if row["Barang"] == "GRAND TOTAL":
@@ -1695,9 +1693,6 @@ def proc_portal_comparison():
             c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari highest quote")
             c_save2.metric("🎯 Total Estimasi Amount", f"Rp {recommended_total:,.0f}".replace(",", "."))
 
-            # ---------------------------------------------------------
-            # PERBANDINGAN FIRST QUOTE vs FINAL (NEGO) — cuma muncul kalau ada nego
-            # ---------------------------------------------------------
             if any_nego_happened:
                 st.markdown("##### 🤝 Perbandingan First Quote vs Final (Setelah Nego)")
                 nego_rows = []
@@ -1706,7 +1701,7 @@ def proc_portal_comparison():
                     first_price = first_quote_lookup.get(key)
                     final_price = dm_row["price"]
                     if first_price is None or dm_row["round"] <= 1:
-                        continue  # gak ada nego buat baris ini
+                        continue
                     delta = final_price - first_price
                     nego_rows.append({
                         "Barang": dm_row["Barang"],
@@ -1724,10 +1719,6 @@ def proc_portal_comparison():
             summary_df = build_vendor_summary(df_m, vendor_list_sorted)
             st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
-            # ---------------------------------------------------------
-            # SPLIT PO: kelompokkan item berdasarkan vendor rekomendasi
-            # (kalau vendor terbaik beda-beda per item, PIC bisa split PO)
-            # ---------------------------------------------------------
             split_data = {}
             for _, r in pivot_items.iterrows():
                 best_v = recommended_vendor_per_item.get(r["Barang"])
@@ -1795,9 +1786,6 @@ def proc_portal_comparison():
 
             weights_dict = {"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime}
 
-            # ---------------------------------------------------------
-            # MINTA NEGO: kirim ulang ke vendor terpilih buat final quotation
-            # ---------------------------------------------------------
             st.markdown("##### 🤝 Open Final Quotation (Nego)")
             nego_vendors_sel = st.multiselect(
                 "Pilih vendor yang akan dimintai final quotation / negosiasi:",
@@ -1820,7 +1808,6 @@ def proc_portal_comparison():
                 cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
             )
 
-            # PDF Download -- ditaruh SETELAH AI insight biar analisisnya ikut kecapture di PDF
             ai_insight_text = st.session_state.get(f"ai_insight_{rfq_title_active}", "")
             pdf_bytes = generate_cqr_pdf(
                 rfq_title_active, pr_info["pr_code"], loc_active, weights_dict,
@@ -1837,9 +1824,8 @@ def proc_portal_comparison():
                     use_container_width=True,
                 )
             else:
-                st.caption("⚠️ Library `reportlab` belum terinstall — tambahkan ke requirements.txt untuk mengaktifkan download PDF.")
+                st.caption("⚠️ Library `reportlab` belum terinstall.")
 
-            # POIN 1: Tombol Mark as Submitted
             if st.button("🔒 Mark as Submitted (Selesai & Arsip)", type="primary", use_container_width=True):
                 try:
                     items_res = sb.table("pr_items").select("id").eq("pr_id", active_id).execute()
@@ -1848,8 +1834,6 @@ def proc_portal_comparison():
                     if item_ids:
                         sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
 
-                        # Simpan vendor pemenang per item (dari rekomendasi yang lagi ditampilkan)
-                        # supaya vendor bisa lihat status menang/kalah di History mereka.
                         name_to_id = {v: k for k, v in vendor_id_to_name.items()}
                         for _, r in pivot_items.iterrows():
                             best_v_name = recommended_vendor_per_item.get(r["Barang"])
@@ -1874,14 +1858,13 @@ def proc_portal_comparison():
         st.header("📊 Monitoring & Price Comparison")
 
         if df_pr.empty:
-            st.info("Belum ada data RFQ yang dipublish.")
+            st.info("Belum ada data RFQ yang dipublish oleh Anda.")
         else:
             st.write("Pilih salah satu RFQ di bawah untuk membuka **Halaman Detail Perbandingan**:")
 
             quotes_res = sb.table("quotes").select("assignment_id").execute()
             submitted_ass_ids = set([q["assignment_id"] for q in quotes_res.data]) if quotes_res.data else set()
 
-            # Ambil semua assignment + vendor + item sekali jalan untuk keperluan search & status
             res_ass_full = (
                 sb.table("rfq_assignments")
                 .select("id, profiles(vendor_name), pr_items(pr_id, description, description2)")
@@ -1895,7 +1878,6 @@ def proc_portal_comparison():
 
             search_query = st.text_input("🔍 Cari Judul RFQ / Lokasi / Vendor / Item...").strip().lower()
 
-            # Sort: RFQ paling baru dikirim ada di paling atas
             df_pr_sorted = df_pr.copy()
             df_pr_sorted["uploaded_at"] = pd.to_datetime(df_pr_sorted.get("uploaded_at"), errors="coerce")
             df_pr_sorted = df_pr_sorted.sort_values("uploaded_at", ascending=False, na_position="last")
@@ -1911,7 +1893,6 @@ def proc_portal_comparison():
                 tag_prio = "🚨 URGENT" if "URGENT" in prio.upper() else "📦 NORMAL"
                 assignments_this_pr = ass_by_pr.get(pr_id, [])
 
-                # Bangun teks pencarian gabungan (judul, lokasi, vendor, item)
                 vendor_names = [(a.get("profiles") or {}).get("vendor_name", "") for a in assignments_this_pr]
                 item_texts = [
                     f"{(a.get('pr_items') or {}).get('description', '')} {(a.get('pr_items') or {}).get('description2', '')}"
@@ -1922,7 +1903,6 @@ def proc_portal_comparison():
                     continue
                 shown_count += 1
 
-                # Badge status submit: Submit Sebagian / Sudah Submit (kalau belum ada yang submit, gak ada badge)
                 total_ass = len(assignments_this_pr)
                 submitted_ass_count = sum(1 for a in assignments_this_pr if a["id"] in submitted_ass_ids)
                 if total_ass == 0 or submitted_ass_count == 0:
