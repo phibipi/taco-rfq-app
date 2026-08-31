@@ -2115,7 +2115,7 @@ def admin_portal_register_pic():
                     ok, err = register_user(p_name, p_email, auto_password, "proc")
                     if ok:
                         st.success(f"🎉 PIC {p_name} berhasil didaftarkan.")
-                        st.info(f"🔑 Password: `{auto_password}` — catat & kirim manual ke PIC ybs.")
+                        st.info(f"📧 Email: `{p_email}`\n\n🔑 Password: `{auto_password}` — catat & kirim manual ke PIC ybs.")
                     else:
                         st.error(f"❌ Gagal: {err}")
     with sub2:
