@@ -119,7 +119,7 @@ def send_pic_welcome_email(pic_name, pic_email, password):
     body = (
         f"Dear {pic_name},\n\n"
         f"Akun Anda untuk Portal TACO Procurement telah berhasil dibuat.\n\n"
-        f"🌐 Link Portal: https://taco-rfq.streamlit.app/\n"
+        f"🌐 Link Portal: https://proctaco.streamlit.app/\n"
         f"👤 Username/Email: {pic_email}\n"
         f"🔑 Password: {password}\n\n"
         f"Silakan login ke portal untuk mengelola RFQ.\n\n"
