@@ -1221,7 +1221,6 @@ def proc_portal_import():
     st.header("📥 Import & Publish Purchase Request")
     already_published = get_already_published_keys()
 
-    # POIN 2: Simpan dataframe Excel ke Session State agar tidak hilang saat ganti menu
     uploaded_file = st.file_uploader("Upload File Excel", type=["xlsx"])
     
     if uploaded_file is not None:
@@ -1240,7 +1239,6 @@ def proc_portal_import():
             st.error(f"Gagal membaca file Excel: {e}")
             return
 
-    # Ambil data dari session state jika ada
     df_raw = st.session_state.get("uploaded_pr_df")
 
     if df_raw is None or df_raw.empty:
@@ -1264,7 +1262,6 @@ def proc_portal_import():
         st.warning("Tidak ada item berstatus 'Open' dengan Qty > 0 di file ini.")
         return
 
-    # Controls: Search, Collapse, & Location Filter
     c_search, c_exp = st.columns([3, 1])
     search_query = c_search.text_input("🔍 Cari (semua kolom: No. PR, Deskripsi, Lokasi, UOM, dll)...")
     
@@ -1272,14 +1269,12 @@ def proc_portal_import():
         st.session_state["expand_all"] = not st.session_state["expand_all"]
         st.rerun()
 
-    # POIN 3: Filter Location di bawah Collapse All
     locations = ["Semua Lokasi"]
     if "LOCATION" in df_display.columns:
         locations += list(df_display["LOCATION"].dropna().unique())
     
     selected_loc = st.selectbox("📍 Filter Lokasi Pengiriman:", locations)
 
-    # Apply Filter -- OPEN SEARCH: cari di SEMUA kolom (kecuali ROW_KEY internal)
     df_to_show = df_display.copy()
     if search_query:
         q = search_query.lower().strip()
@@ -1309,159 +1304,149 @@ def proc_portal_import():
         with st.container(height=400, border=True):
             render_pr_list(df_normal, already_published)
 
-# =========================================================
-            # REVIEW & ASSIGN VENDOR (WITH EDITABLE VENDOR EMAIL TABLE)
-            # =========================================================
-            st.divider()
-            st.subheader("🎯 Review & Assign Vendor")
-            selected_keys = [k for k, v in st.session_state["selected_items_dict"].items() if v]
-            final_items = df_display[df_display["ROW_KEY"].isin(selected_keys)].copy()
+    # =========================================================
+    # REVIEW & ASSIGN VENDOR (WITH EDITABLE VENDOR EMAIL TABLE)
+    # =========================================================
+    st.divider()
+    st.subheader("🎯 Review & Assign Vendor")
+    selected_keys = [k for k, v in st.session_state["selected_items_dict"].items() if v]
+    final_items = df_display[df_display["ROW_KEY"].isin(selected_keys)].copy()
 
-            if final_items.empty:
-                st.info("Belum ada item yang dipilih.")
-            else:
-                c_title, c_reset = st.columns([4, 1])
-                with c_title:
-                    rfq_title_val = st.text_input("🏷️ Judul RFQ (Wajib)", placeholder="Contoh: Pengadaan Sparepart Staples Batam").strip()
-                with c_reset:
-                    st.write(" ")
-                    st.write(" ")
-                    if st.button("🔄 Reset Pilihan", use_container_width=True):
-                        st.session_state["selected_items_dict"] = {}
-                        st.rerun()
+    if final_items.empty:
+        st.info("Belum ada item yang dipilih.")
+    else:
+        c_title, c_reset = st.columns([4, 1])
+        with c_title:
+            rfq_title_val = st.text_input("🏷️ Judul RFQ (Wajib)", placeholder="Contoh: Pengadaan Sparepart Staples Batam").strip()
+        with c_reset:
+            st.write(" ")
+            st.write(" ")
+            if st.button("🔄 Reset Pilihan", use_container_width=True):
+                st.session_state["selected_items_dict"] = {}
+                st.rerun()
 
-                for col in ["PR CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]:
-                    if col not in final_items.columns:
-                        final_items[col] = "-"
+        for col in ["PR CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]:
+            if col not in final_items.columns:
+                final_items[col] = "-"
 
-                review_df = final_items[["LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]].copy()
-                review_df.columns = ["LOCATION", "DESCRIPTION", "DESCRIPTION_2", "QUANTITY", "UOM"]
-                review_df["CATATAN_BARIS_ATAU_LINK_GAMBAR"] = "-"
+        review_df = final_items[["LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]].copy()
+        review_df.columns = ["LOCATION", "DESCRIPTION", "DESCRIPTION_2", "QUANTITY", "UOM"]
+        review_df["CATATAN_BARIS_ATAU_LINK_GAMBAR"] = "-"
 
-                edited = st.data_editor(
-                    review_df, 
-                    hide_index=True, 
+        edited = st.data_editor(
+            review_df, 
+            hide_index=True, 
+            use_container_width=True,
+            disabled=["LOCATION", "UOM"], 
+            key="admin_editor"
+        )
+
+        attached_files = st.file_uploader(
+            "📁 Lampirkan file gambar/PDF referensi", accept_multiple_files=True,
+            type=["png", "jpg", "jpeg", "pdf"],
+        )
+
+        df_v = get_vendors()
+        if df_v.empty:
+            st.warning("Belum ada vendor terdaftar.")
+        else:
+            sel_v_names = st.multiselect("Pilih Vendor Penerima RFQ:", df_v["vendor_name"].unique())
+
+            edited_vendor_emails = {}
+            if sel_v_names:
+                st.markdown("##### 📧 Checking Email Vendor Penerima RFQ")
+                st.caption("💡 Anda dapat mengedit / menambahkan email tujuan (pisahkan dengan `;` jika lebih dari satu). Perubahan di sini akan otomatis ter-update ke data vendor.")
+                
+                selected_vendors_df = df_v[df_v["vendor_name"].isin(sel_v_names)][["id", "vendor_name", "email"]].copy()
+                selected_vendors_df.columns = ["vendor_id", "Nama Vendor", "Email Tujuan (Bisa multi-email pisah ;)"]
+
+                edited_v_df = st.data_editor(
+                    selected_vendors_df,
+                    hide_index=True,
                     use_container_width=True,
-                    disabled=["LOCATION", "UOM"], 
-                    key="admin_editor"
+                    disabled=["Nama Vendor"],
+                    key="vendor_email_checker_editor"
                 )
 
-                attached_files = st.file_uploader(
-                    "📁 Lampirkan file gambar/PDF referensi", accept_multiple_files=True,
-                    type=["png", "jpg", "jpeg", "pdf"],
+                for _, v_row in edited_v_df.iterrows():
+                    edited_vendor_emails[v_row["vendor_id"]] = {
+                        "name": v_row["Nama Vendor"],
+                        "email": str(v_row["Email Tujuan (Bisa multi-email pisah ;)"]).strip()
+                    }
+
+            has_urgent_item = False
+            if "PRIORITY STATUS" in final_items.columns:
+                has_urgent_item = final_items["PRIORITY STATUS"].astype(str).str.upper().str.contains("URGENT").any()
+
+            default_priority_index = 0 if has_urgent_item else 1
+
+            c_left, c_right = st.columns(2)
+            with c_left:
+                default_deadline = datetime.today() + timedelta(days=3)
+                rfq_deadline_val = st.date_input("📅 Batas Waktu Vendor:", value=default_deadline)
+                
+                priority_val = st.radio(
+                    "🚨 Tingkat Prioritas RFQ:", 
+                    ["URGENT", "NORMAL"], 
+                    index=default_priority_index
+                )
+                delivery_type_val = st.radio("🚚 Metode Pengiriman:", ["Franco (Kirim ke lokasi)", "Loco (Pengambilan sendiri)"])
+            with c_right:
+                pic_notes_val = st.text_area("📝 Catatan Tambahan Khusus Vendor:")
+                reset_pw_on_send = st.checkbox(
+                    "🔐 Reset & sertakan password login di email undangan (untuk vendor yang belum bisa login / lupa password)"
                 )
 
-                df_v = get_vendors()
-                if df_v.empty:
-                    st.warning("Belum ada vendor terdaftar.")
+            if st.button("🚀 Publish Undangan RFQ", type="primary", use_container_width=True):
+                if not rfq_title_val:
+                    st.error("❌ Mohon isi 'Judul RFQ' terlebih dahulu!")
+                elif not sel_v_names:
+                    st.error("❌ Silakan pilih minimal satu vendor.")
                 else:
-                    sel_v_names = st.multiselect("Pilih Vendor Penerima RFQ:", df_v["vendor_name"].unique())
+                    vendor_ids = list(edited_vendor_emails.keys())
+                    pr_code_main = str(final_items["PR CODE"].iloc[0]) if "PR CODE" in final_items.columns else "-"
+                    location_main = str(edited["LOCATION"].iloc[0])
 
-                    # ---------------------------------------------------------
-                    # TABEL CHECKING & EDIT EMAIL VENDOR (FITUR BARU)
-                    # ---------------------------------------------------------
-                    edited_vendor_emails = {}
-                    if sel_v_names:
-                        st.markdown("##### 📧 Checking Email Vendor Penerima RFQ")
-                        st.caption("💡 Anda dapat mengedit / menambahkan email tujuan (pisahkan dengan `;` jika lebih dari satu). Perubahan di sini akan otomatis ter-update ke data vendor.")
-                        
-                        # Ambil data vendor terpilih
-                        selected_vendors_df = df_v[df_v["vendor_name"].isin(sel_v_names)][["id", "vendor_name", "email"]].copy()
-                        selected_vendors_df.columns = ["vendor_id", "Nama Vendor", "Email Tujuan (Bisa multi-email pisah ;)"]
+                    pr_id = publish_rfq(
+                        rfq_title_val, pr_code_main, location_main, priority_val,
+                        st.session_state["user_info"]["id"], edited, vendor_ids,
+                        delivery_type_val, pic_notes_val, rfq_deadline_val, attached_files or [],
+                    )
 
-                        edited_v_df = st.data_editor(
-                            selected_vendors_df,
-                            hide_index=True,
-                            use_container_width=True,
-                            disabled=["Nama Vendor"],
-                            key="vendor_email_checker_editor"
-                        )
+                    items_text_email = "\n".join(
+                        f"- {r['DESCRIPTION']} {r['DESCRIPTION_2']} ({r['QUANTITY']} {r['UOM']}) [Note: {r['CATATAN_BARIS_ATAU_LINK_GAMBAR']}]"
+                        for _, r in edited.iterrows()
+                    )
 
-                        # Simpan pemetaan email hasil editan
-                        for _, v_row in edited_v_df.iterrows():
-                            edited_vendor_emails[v_row["vendor_id"]] = {
-                                "name": v_row["Nama Vendor"],
-                                "email": str(v_row["Email Tujuan (Bisa multi-email pisah ;)"]).strip()
-                            }
+                    with st.spinner("Mengirim notifikasi email & mengupdate data vendor..."):
+                        for v_id, v_info in edited_vendor_emails.items():
+                            v_name = v_info["name"]
+                            target_email = v_info["email"]
 
-                    # Logic Default Priority
-                    has_urgent_item = False
-                    if "PRIORITY STATUS" in final_items.columns:
-                        has_urgent_item = final_items["PRIORITY STATUS"].astype(str).str.upper().str.contains("URGENT").any()
+                            try:
+                                sb.table("profiles").update({"email": target_email}).eq("id", v_id).execute()
+                            except Exception as e_up:
+                                st.warning(f"⚠️ Gagal meng-update email di profil {v_name}: {e_up}")
 
-                    default_priority_index = 0 if has_urgent_item else 1
-
-                    c_left, c_right = st.columns(2)
-                    with c_left:
-                        default_deadline = datetime.today() + timedelta(days=3)
-                        rfq_deadline_val = st.date_input("📅 Batas Waktu Vendor:", value=default_deadline)
-                        
-                        priority_val = st.radio(
-                            "🚨 Tingkat Prioritas RFQ:", 
-                            ["URGENT", "NORMAL"], 
-                            index=default_priority_index
-                        )
-                        delivery_type_val = st.radio("🚚 Metode Pengiriman:", ["Franco (Kirim ke lokasi)", "Loco (Pengambilan sendiri)"])
-                    with c_right:
-                        pic_notes_val = st.text_area("📝 Catatan Tambahan Khusus Vendor:")
-                        reset_pw_on_send = st.checkbox(
-                            "🔐 Reset & sertakan password login di email undangan (untuk vendor yang belum bisa login / lupa password)"
-                        )
-
-                    if st.button("🚀 Publish Undangan RFQ", type="primary", use_container_width=True):
-                        if not rfq_title_val:
-                            st.error("❌ Mohon isi 'Judul RFQ' terlebih dahulu!")
-                        elif not sel_v_names:
-                            st.error("❌ Silakan pilih minimal satu vendor.")
-                        else:
-                            vendor_ids = list(edited_vendor_emails.keys())
-                            pr_code_main = str(final_items["PR CODE"].iloc[0]) if "PR CODE" in final_items.columns else "-"
-                            location_main = str(edited["LOCATION"].iloc[0])
-
-                            # Publish RFQ ke DB
-                            pr_id = publish_rfq(
-                                rfq_title_val, pr_code_main, location_main, priority_val,
-                                st.session_state["user_info"]["id"], edited, vendor_ids,
-                                delivery_type_val, pic_notes_val, rfq_deadline_val, attached_files or [],
-                            )
-
-                            items_text_email = "\n".join(
-                                f"- {r['DESCRIPTION']} {r['DESCRIPTION_2']} ({r['QUANTITY']} {r['UOM']}) [Note: {r['CATATAN_BARIS_ATAU_LINK_GAMBAR']}]"
-                                for _, r in edited.iterrows()
-                            )
-
-                            with st.spinner("Mengirim notifikasi email & mengupdate data vendor..."):
-                                for v_id, v_info in edited_vendor_emails.items():
-                                    v_name = v_info["name"]
-                                    target_email = v_info["email"]
-
-                                    # 1. UPDATE EMAIL VENDOR KE DATABASE SUPABASE (JIKA DIBUAT/DIUBAH OLEH PIC)
-                                    try:
-                                        sb.table("profiles").update({"email": target_email}).eq("id", v_id).execute()
-                                    except Exception as e_up:
-                                        st.warning(f"⚠️ Gagal meng-update email di profil {v_name}: {e_up}")
-
-                                    # 2. LOGIC RESET PASSWORD (JIKA DICENTANG)
+                            new_password = None
+                            if reset_pw_on_send:
+                                new_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                                ok_reset, err_reset = reset_user_password(v_id, new_password)
+                                if not ok_reset:
+                                    st.warning(f"⚠️ Gagal reset password untuk {v_name}: {err_reset}")
                                     new_password = None
-                                    if reset_pw_on_send:
-                                        new_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-                                        ok_reset, err_reset = reset_user_password(v_id, new_password)
-                                        if not ok_reset:
-                                            st.warning(f"⚠️ Gagal reset password untuk {v_name}: {err_reset}")
-                                            new_password = None
 
-                                    # 3. KIRIM EMAIL SINKRON DENGAN DRAFT EMAIL BARU HASIL EDITAN
-                                    send_rfq_email(
-                                        target_email, v_name, rfq_title_val,
-                                        rfq_deadline_val.strftime("%d %b %Y"), items_text_email,
-                                        delivery_type_val, pic_notes_val, attached_files or [],
-                                        vendor_password=new_password,
-                                    )
+                            send_rfq_email(
+                                target_email, v_name, rfq_title_val,
+                                rfq_deadline_val.strftime("%d %b %Y"), items_text_email,
+                                delivery_type_val, pic_notes_val, attached_files or [],
+                                vendor_password=new_password,
+                            )
 
-                            st.toast("🚀 Undangan RFQ Berhasil Diterbitkan!", icon="🎉")
-                            st.success(f"✅ Undangan RFQ '{rfq_title_val}' telah terkirim ke vendor & email berhasil diperbarui!")
-                            st.session_state["selected_items_dict"] = {}
-                            st.rerun()
+                    st.toast("🚀 Undangan RFQ Berhasil Diterbitkan!", icon="🎉")
+                    st.success(f"✅ Undangan RFQ '{rfq_title_val}' telah terkirim ke vendor & email berhasil diperbarui!")
+                    st.session_state["selected_items_dict"] = {}
+                    st.rerun()
 
 
 # =====================================================================
@@ -2294,14 +2279,12 @@ def admin_portal_register_pic():
 
 
 def admin_portal_register_vendor():
-    st.header("➕ Daftarkan Vendor Baru")
-    st.caption("💡 Masukkan nama vendor & email. Jika lebih dari 1 email, pisahkan dengan tanda titik koma (`;`). Email pertama akan menjadi Username Login utama vendor.")
-    
+    st.header("➕ Daftarkan Vendor")
     sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
     with sub1:
         with st.form("form_register_vendor", clear_on_submit=True):
-            v_name = st.text_input("Nama Vendor", placeholder="Contoh: PT. Maju Jaya").strip()
-            v_email = st.text_input("Email Vendor (opsional multi-email pisah ';')", placeholder="Contoh: sales@vendor.com; admin@vendor.com").strip().lower()
+            v_name = st.text_input("Nama Vendor").strip()
+            v_email = st.text_input("Email Vendor").strip().lower()
             submitted = st.form_submit_button("Simpan Vendor Baru", type="primary")
             if submitted:
                 if not v_name or not v_email or "@" not in v_email:
@@ -2318,25 +2301,30 @@ def admin_portal_register_vendor():
         if result:
             if result["ok"]:
                 st.success(
-                    f"🎉 Vendor **{result['name']}** berhasil didaftarkan! "
-                    "Email notifikasi login **belum dikirimkan** sekarang, dan akan otomatis dikirimkan saat Anda menerbitkan undangan RFQ pertama kali."
+                    f"🎉 Vendor {result['name']} berhasil didaftarkan. "
+                    "Password akan otomatis disertakan saat Anda mengirim undangan RFQ pertama ke vendor ini "
+                    "(centang opsi 'Reset & sertakan password' di halaman Import PR List)."
                 )
             else:
                 st.error(result["msg"])
 
     with sub2:
-        st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email** (bisa dipisah `;` di kolom email).")
+        st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email**.")
         bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_vendor")
         if bulk_file is not None:
             df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
             st.dataframe(df_bulk, use_container_width=True, hide_index=True)
             if st.button("🚀 Daftarkan Semua Vendor Ini", type="primary"):
                 result_df = bulk_register_users(df_bulk, "vendor")
+                # Simpan cuma nama, email, status -- password TIDAK disimpan/ditampilkan di sini
                 st.session_state["last_vendor_bulk_result"] = result_df[["name", "email", "status"]]
 
         bulk_result = st.session_state.get("last_vendor_bulk_result")
         if bulk_result is not None and not bulk_result.empty:
-            st.success("Selesai! Vendor berhasil didaftarkan tanpa pengiriman email awal.")
+            st.success(
+                "Selesai! Vendor berhasil didaftarkan. Password akan otomatis disertakan "
+                "saat Anda mengirim undangan RFQ pertama ke masing-masing vendor."
+            )
             st.dataframe(bulk_result, use_container_width=True, hide_index=True)
 
 
