@@ -191,9 +191,12 @@ def register_user(name, email_input, password, role):
         uid = created.user.id
 
         # Simpan email yang sudah dinormalisasi (rapi, trim, lowercase) ke DB profile
-        sb.table("profiles").insert(
-            {"id": uid, "email": normalized_email_str, "role": role, "vendor_name": name}
-        ).execute()
+        
+        # kirim password (lihat mark_credentials_delivered()).
+        profile_payload = {"id": uid, "email": normalized_email_str, "role": role, "vendor_name": name}
+        if role == "vendor":
+            profile_payload["credentials_sent"] = False
+        sb.table("profiles").insert(profile_payload).execute()
 
         # Jika yang didaftarkan adalah PIC Procurement, LANGSUNG kirim email info login
         if role == "proc":
@@ -300,7 +303,16 @@ def reset_user_password(user_id, new_password):
         return True, None
     except Exception as e:
         return False, str(e)
-
+        
+def mark_credentials_delivered(vendor_id):
+    """Tandai vendor ini sudah pernah menerima info login (email+password) via undangan RFQ.
+    Sekali dapat, dia gak akan di-reset otomatis lagi tiap ada RFQ baru -- supaya passwordnya
+    konsisten walau ada beberapa RFQ jalan berbarengan / dari PIC berbeda."""
+    try:
+        sb.table("profiles").update({"credentials_sent": True}).eq("id", vendor_id).execute()
+        return True
+    except Exception:
+        return False
 
 def get_vendors():
     return get_users_by_role("vendor")
@@ -1390,6 +1402,9 @@ def render_import_workspace(df_display):
                     hide_index=True,
                     use_container_width=True,
                     disabled=["Nama Vendor"],
+                    column_config={
+                        "vendor_id": None  # <--- ID DISEMBUNYIKAN DARI TAMPILAN
+                    },
                     key="vendor_email_checker_editor"
                 )
 
@@ -1420,10 +1435,14 @@ def render_import_workspace(df_display):
                     index=default_priority_index
                 )
                 delivery_type_val = st.radio("🚚 Metode Pengiriman:", ["Franco (Kirim ke lokasi)", "Loco (Pengambilan sendiri)"])
-            with c_right:
+           with c_right:
                 pic_notes_val = st.text_area("📝 Catatan Tambahan Khusus Vendor:")
-                reset_pw_on_send = st.checkbox(
-                    "🔐 Reset & sertakan password login di email undangan (untuk vendor yang belum bisa login / lupa password)"
+                st.caption(
+                    "💡 Info login (email & password) otomatis disertakan di undangan HANYA untuk "
+                    "vendor yang **belum pernah** menerima info login sebelumnya. Vendor yang sudah "
+                    "pernah menerima **tidak** akan di-reset otomatis — supaya passwordnya gak "
+                    "berubah-ubah kalau ada beberapa RFQ jalan berbarengan. Kalau vendor lupa "
+                    "password, reset manual lewat menu 🔑 Reset Password."
                 )
 
             if st.button("🚀 Publish Undangan RFQ", type="primary", use_container_width=True):
@@ -1457,12 +1476,22 @@ def render_import_workspace(df_display):
                             except Exception as e_up:
                                 st.warning(f"⚠️ Gagal meng-update email di profil {v_name}: {e_up}")
 
+                            # Otomatis: kirim password HANYA kalau vendor ini BELUM PERNAH
+                            # menerima info login sebelumnya. Kalau sudah pernah -> jangan
+                            # reset (biar gak bentrok kalau ada RFQ lain jalan berbarengan).
+                            vendor_row = df_v[df_v["id"] == v_id]
+                            already_has_credentials = bool(
+                                vendor_row.iloc[0].get("credentials_sent", False)
+                            ) if not vendor_row.empty else False
+
                             new_password = None
-                            if reset_pw_on_send:
+                            if not already_has_credentials:
                                 new_password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
                                 ok_reset, err_reset = reset_user_password(v_id, new_password)
-                                if not ok_reset:
-                                    st.warning(f"⚠️ Gagal reset password untuk {v_name}: {err_reset}")
+                                if ok_reset:
+                                    mark_credentials_delivered(v_id)
+                                else:
+                                    st.warning(f"⚠️ Gagal membuat password awal untuk {v_name}: {err_reset}")
                                     new_password = None
 
                             send_rfq_email(
