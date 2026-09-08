@@ -1435,7 +1435,7 @@ def render_import_workspace(df_display):
                     index=default_priority_index
                 )
                 delivery_type_val = st.radio("🚚 Metode Pengiriman:", ["Franco (Kirim ke lokasi)", "Loco (Pengambilan sendiri)"])
-           with c_right:
+            with c_right:
                 pic_notes_val = st.text_area("📝 Catatan Tambahan Khusus Vendor:")
                 st.caption(
                     "💡 Info login (email & password) otomatis disertakan di undangan HANYA untuk "
