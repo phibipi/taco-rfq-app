@@ -1149,7 +1149,7 @@ def show_login():
                         st.error("⚠️ Gagal login karena masalah koneksi/server. Coba lagi sebentar.")
 
 
-def render_pr_list(df_source, already_published):
+def render_pr_list(df_source, already_published, scope_tag):
     """Render list PR + checkbox item, dipakai buat tab Urgent & Normal.
     Dibungkus @st.fragment supaya centang checkbox / Pilih Semua / Hapus Semua
     cuma rerun bagian ini aja, bukan seluruh halaman (biar gak blinking / lemot)."""
@@ -1163,15 +1163,15 @@ def render_pr_list(df_source, already_published):
         prio = str(df_group["PRIORITY STATUS"].iloc[0]) if "PRIORITY STATUS" in df_group.columns else "-"
         label = f"📄 PR: {pr_no} | 📍 {loc}" + (" | 🚨 URGENT" if "URGENT" in prio.upper() else "")
 
-        with st.expander(label, expanded=st.session_state.get("expand_all", False)):
+        with st.expander(label, expanded=st.session_state.get("expand_all", False), key=f"exp_{scope_tag}_{pr_no}"):
             cA, cB, _ = st.columns([1, 1, 3])
 
-            if cA.button("✅ Pilih Semua", key=f"all_{pr_no}"):
+            if cA.button("✅ Pilih Semua", key=f"all_{scope_tag}_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state[f"chk_{k}"] = True
                 st.rerun(scope="fragment")
 
-            if cB.button("🗑️ Hapus Semua", key=f"none_{pr_no}"):
+            if cB.button("🗑️ Hapus Semua", key=f"none_{scope_tag}_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state[f"chk_{k}"] = False
                 st.rerun(scope="fragment")
@@ -1214,11 +1214,11 @@ def render_selection_and_review(df_to_show, df_display, already_published):
 
     with sub_tab_urgent:
         with st.container(height=400, border=True):
-            render_pr_list(df_urgent, already_published)
+            render_pr_list(df_urgent, already_published, "urgent")
 
     with sub_tab_normal:
         with st.container(height=400, border=True):
-            render_pr_list(df_normal, already_published)
+            render_pr_list(df_normal, already_published, "normal")
 
     # =========================================================
     # REVIEW & ASSIGN VENDOR (WITH EDITABLE VENDOR EMAIL TABLE)
