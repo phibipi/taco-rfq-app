@@ -395,11 +395,14 @@ def get_already_published_keys_cached():
 # UI HELPER: reset checkbox item (dipakai proc_portal_import)
 # =====================================================================
 def reset_checkbox_selection(df):
-    """Uncheck semua checkbox item (key 'chk_<ROW_KEY>') untuk baris-baris di df ini."""
+    """Uncheck semua checkbox item (key 'chk_<ROW_KEY>') untuk baris-baris di df ini,
+    dan buang juga dari 'selected_row_keys' (memori persisten pilihan)."""
     if df is None or df.empty or "ROW_KEY" not in df.columns:
         return
+    selected = st.session_state.setdefault("selected_row_keys", set())
     for k in df["ROW_KEY"]:
         st.session_state[f"chk_{k}"] = False
+        selected.discard(k)
 
 
 # =====================================================================
@@ -1149,13 +1152,26 @@ def show_login():
                         st.error("⚠️ Gagal login karena masalah koneksi/server. Coba lagi sebentar.")
 
 
+def _sync_item_selection(row_key):
+    """Callback checkbox: sinkronkan status centang ke 'selected_row_keys'
+    (persistent, gak akan kehapus otomatis walau checkbox-nya gak dirender lagi
+    -- beda sama session_state bawaan widget yang auto-kehapus kalau widgetnya
+    gak muncul di suatu run, misal karena ke-filter search)."""
+    key = f"chk_{row_key}"
+    selected = st.session_state.setdefault("selected_row_keys", set())
+    if st.session_state.get(key, False):
+        selected.add(row_key)
+    else:
+        selected.discard(row_key)
+
+
 def render_pr_list(df_source, already_published, scope_tag):
-    """Render list PR + checkbox item, dipakai buat tab Urgent & Normal.
-    Dibungkus @st.fragment supaya centang checkbox / Pilih Semua / Hapus Semua
-    cuma rerun bagian ini aja, bukan seluruh halaman (biar gak blinking / lemot)."""
+    """Render list PR + checkbox item, dipakai buat tab Urgent & Normal."""
     if df_source.empty:
         st.info("Tidak ada item di kategori ini.")
         return
+
+    selected_row_keys = st.session_state.setdefault("selected_row_keys", set())
 
     for pr_no in df_source["PR CODE"].unique():
         df_group = df_source[df_source["PR CODE"] == pr_no].reset_index(drop=True)
@@ -1163,17 +1179,19 @@ def render_pr_list(df_source, already_published, scope_tag):
         prio = str(df_group["PRIORITY STATUS"].iloc[0]) if "PRIORITY STATUS" in df_group.columns else "-"
         label = f"📄 PR: {pr_no} | 📍 {loc}" + (" | 🚨 URGENT" if "URGENT" in prio.upper() else "")
 
-        with st.expander(label, expanded=st.session_state.get("expand_all", False), key=f"exp_{scope_tag}_{pr_no}"):
+        with st.expander(label, expanded=st.session_state.get("expand_all", False)):
             cA, cB, _ = st.columns([1, 1, 3])
 
             if cA.button("✅ Pilih Semua", key=f"all_{scope_tag}_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state[f"chk_{k}"] = True
+                    selected_row_keys.add(k)
                 st.rerun(scope="fragment")
 
             if cB.button("🗑️ Hapus Semua", key=f"none_{scope_tag}_{pr_no}"):
                 for k in df_group["ROW_KEY"]:
                     st.session_state[f"chk_{k}"] = False
+                    selected_row_keys.discard(k)
                 st.rerun(scope="fragment")
 
             h1, h2, h3, h4, h5 = st.columns([0.5, 3, 3, 1, 1])
@@ -1193,8 +1211,17 @@ def render_pr_list(df_source, already_published, scope_tag):
                 c1, c2, c3, c4, c5 = st.columns([0.5, 3, 3, 1, 1])
                 st.markdown(f'<div style="background-color:{bg}; padding:4px; border-radius:4px;">', unsafe_allow_html=True)
 
-                # key checkbox TETAP (gak ada suffix dinamis) -> gak dianggap widget baru tiap render
-                c1.checkbox("sel", key=f"chk_{row_key}", label_visibility="collapsed")
+                chk_key = f"chk_{row_key}"
+                # Kalau key checkbox ini sempat "kehapus" oleh Streamlit (karena
+                # sebelumnya gak dirender, misal ke-filter search), re-init dari
+                # 'selected_row_keys' yang persistent, biar centangnya gak reset.
+                if chk_key not in st.session_state:
+                    st.session_state[chk_key] = row_key in selected_row_keys
+
+                c1.checkbox(
+                    "sel", key=chk_key, label_visibility="collapsed",
+                    on_change=_sync_item_selection, args=(row_key,),
+                )
 
                 c2.write(item_row.get("DESCRIPTION", ""))
                 c3.write(item_row.get("DESCRIPTION 2", ""))
@@ -1307,11 +1334,8 @@ def render_import_workspace(df_display):
     # =========================================================
     st.divider()
     st.subheader("🎯 Review & Assign Vendor")
-    selected_keys = [
-        k for k in df_display["ROW_KEY"]
-        if st.session_state.get(f"chk_{k}", False)
-    ]
-    final_items = df_display[df_display["ROW_KEY"].isin(selected_keys)].copy()
+    selected_row_keys = st.session_state.setdefault("selected_row_keys", set())
+    final_items = df_display[df_display["ROW_KEY"].isin(selected_row_keys)].copy()
 
     if final_items.empty:
         st.info("Belum ada item yang dipilih.")
