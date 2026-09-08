@@ -406,15 +406,12 @@ def get_already_published_keys_cached():
 # =====================================================================
 # UI HELPER: reset checkbox item (dipakai proc_portal_import)
 # =====================================================================
-def reset_checkbox_selection(df):
-    """Uncheck semua checkbox item (key 'chk_<ROW_KEY>') untuk baris-baris di df ini,
-    dan buang juga dari 'selected_row_keys' (memori persisten pilihan)."""
-    if df is None or df.empty or "ROW_KEY" not in df.columns:
-        return
-    selected = st.session_state.setdefault("selected_row_keys", set())
-    for k in df["ROW_KEY"]:
-        st.session_state[f"chk_{k}"] = False
-        selected.discard(k)
+def reset_checkbox_selection(df=None):
+    """Set FLAG dulu -- reset asli baru dieksekusi di awal render berikutnya
+    (render_import_workspace), SEBELUM checkbox digambar. Kalau reset langsung
+    di sini, bisa bentrok sama checkbox yang sudah kadung diinstansiasi di run
+    yang sama -> StreamlitWidgetAlreadyInstantiatedError."""
+    st.session_state["_pending_selection_reset"] = True
 
 
 # =====================================================================
@@ -1294,6 +1291,15 @@ def proc_portal_import():
 # =====================================================================
 @st.fragment
 def render_import_workspace(df_display):
+    # Kalau ada permintaan reset pilihan tertunda (dari tombol "Reset Pilihan"
+    # atau setelah Publish RFQ berhasil), eksekusi SEKARANG -- sebelum checkbox
+    # mana pun digambar di run ini -- biar gak bentrok dengan widget yang sudah
+    # diinstansiasi (StreamlitWidgetAlreadyInstantiatedError).
+    if st.session_state.pop("_pending_selection_reset", False):
+        for k in df_display["ROW_KEY"]:
+            st.session_state.pop(f"chk_{k}", None)
+        st.session_state["selected_row_keys"] = set()
+
     already_published = get_already_published_keys_cached()
 
     if "expand_all" not in st.session_state:
