@@ -1201,8 +1201,90 @@ def render_pr_list(df_source, already_published, scope_tag):
                 c4.write(item_row.get("QUANTITY", ""))
                 c5.write(item_row.get("UOM", ""))
                 st.markdown("</div>", unsafe_allow_html=True)
+
+# =====================================================================
+# UI: PROC - IMPORT PR LIST
+# =====================================================================
+def proc_portal_import():
+    st.header("📥 Import & Publish Purchase Request")
+
+    uploaded_file = st.file_uploader("Upload File Excel", type=["xlsx"])
+
+    if uploaded_file is not None:
+        try:
+            df_raw = pd.read_excel(uploaded_file, header=2)
+            df_raw.columns = [clean(c).upper() for c in df_raw.columns]
+            if "PR CODE" not in df_raw.columns and "DESCRIPTION" not in df_raw.columns:
+                uploaded_file.seek(0)
+                df_raw = pd.read_excel(uploaded_file, header=0)
+                df_raw.columns = [clean(c).upper() for c in df_raw.columns]
+
+            df_raw = df_raw.reset_index(drop=True)
+            df_raw["ROW_KEY"] = df_raw.index.astype(str)
+            st.session_state["uploaded_pr_df"] = df_raw
+        except Exception as e:
+            st.error(f"Gagal membaca file Excel: {e}")
+            return
+
+    df_raw = st.session_state.get("uploaded_pr_df")
+
+    if df_raw is None or df_raw.empty:
+        st.info("Silakan upload file Excel PR untuk memulai.")
+        return
+
+    df_display = df_raw.copy()
+    if "STATUS" in df_raw.columns:
+        df_display = df_display[df_display["STATUS"].astype(str).str.strip().str.upper() == "OPEN"]
+    if "QUANTITY" in df_raw.columns:
+        df_raw["QUANTITY"] = pd.to_numeric(df_raw["QUANTITY"], errors="coerce").fillna(0)
+        df_display = df_display[pd.to_numeric(df_display["QUANTITY"], errors="coerce") > 0]
+
+    if df_display.empty:
+        st.warning("Tidak ada item berstatus 'Open' dengan Qty > 0 di file ini.")
+        return
+
+    # Semua interaksi (search, filter, checklist, review) ada dalam SATU fragment
+    render_import_workspace(df_display)
+
+
+# =====================================================================
+# WORKSPACE: SEARCH + FILTER + CHECKLIST + REVIEW & ASSIGN
+# Dibungkus @st.fragment SATU KALI biar semua interaksi (ketik search,
+# klik checkbox, pilih semua/hapus semua, expand/collapse) gak
+# nge-rerun seluruh app -> gak ada flicker/reset di tabel bawah.
+# =====================================================================
 @st.fragment
-def render_selection_and_review(df_to_show, df_display, already_published):
+def render_import_workspace(df_display):
+    already_published = get_already_published_keys_cached()
+
+    if "expand_all" not in st.session_state:
+        st.session_state["expand_all"] = False
+
+    c_search, c_exp = st.columns([3, 1])
+    search_query = c_search.text_input("🔍 Cari (semua kolom: No. PR, Deskripsi, Lokasi, UOM, dll)...")
+
+    if c_exp.button("📂 Collapse All" if st.session_state["expand_all"] else "📂 Expand All", use_container_width=True):
+        st.session_state["expand_all"] = not st.session_state["expand_all"]
+        st.rerun(scope="fragment")
+
+    locations = ["Semua Lokasi"]
+    if "LOCATION" in df_display.columns:
+        locations += list(df_display["LOCATION"].dropna().unique())
+
+    selected_loc = st.selectbox("📍 Filter Lokasi Pengiriman:", locations)
+
+    df_to_show = df_display.copy()
+    if search_query:
+        q = clean(search_query).lower()
+        search_cols = [c for c in df_to_show.columns if c != "ROW_KEY"]
+        mask = pd.Series(False, index=df_to_show.index)
+        for col in search_cols:
+            mask = mask | df_to_show[col].astype(str).str.lower().str.contains(q, na=False, regex=False)
+        df_to_show = df_to_show[mask]
+
+    if selected_loc != "Semua Lokasi" and "LOCATION" in df_to_show.columns:
+        df_to_show = df_to_show[df_to_show["LOCATION"] == selected_loc]
+
     sub_tab_urgent, sub_tab_normal = st.tabs(["🚨 Urgent Items", "📦 Normal Items"])
 
     if "PRIORITY STATUS" in df_to_show.columns:
@@ -1242,7 +1324,7 @@ def render_selection_and_review(df_to_show, df_display, already_published):
             st.write(" ")
             if st.button("🔄 Reset Pilihan", use_container_width=True):
                 reset_checkbox_selection(df_display)
-                st.rerun()
+                st.rerun(scope="fragment")
 
         for col in ["PR CODE", "LOCATION", "DESCRIPTION", "DESCRIPTION 2", "QUANTITY", "UOM"]:
             if col not in final_items.columns:
@@ -1373,79 +1455,6 @@ def render_selection_and_review(df_to_show, df_display, already_published):
                     st.success(f"✅ Undangan RFQ '{rfq_title_val}' telah terkirim ke vendor & email berhasil diperbarui!")
                     reset_checkbox_selection(df_display)
                     st.rerun()
-
-# =====================================================================
-# UI: PROC - IMPORT PR LIST
-# =====================================================================
-def proc_portal_import():
-    st.header("📥 Import & Publish Purchase Request")
-    already_published = get_already_published_keys_cached()
-
-    uploaded_file = st.file_uploader("Upload File Excel", type=["xlsx"])
-
-    if uploaded_file is not None:
-        try:
-            df_raw = pd.read_excel(uploaded_file, header=2)
-            df_raw.columns = [clean(c).upper() for c in df_raw.columns]
-            if "PR CODE" not in df_raw.columns and "DESCRIPTION" not in df_raw.columns:
-                uploaded_file.seek(0)
-                df_raw = pd.read_excel(uploaded_file, header=0)
-                df_raw.columns = [clean(c).upper() for c in df_raw.columns]
-
-            df_raw = df_raw.reset_index(drop=True)
-            df_raw["ROW_KEY"] = df_raw.index.astype(str)
-            st.session_state["uploaded_pr_df"] = df_raw
-        except Exception as e:
-            st.error(f"Gagal membaca file Excel: {e}")
-            return
-
-    df_raw = st.session_state.get("uploaded_pr_df")
-
-    if df_raw is None or df_raw.empty:
-        st.info("Silakan upload file Excel PR untuk memulai.")
-        return
-
-    if "expand_all" not in st.session_state:
-        st.session_state["expand_all"] = False
-
-    df_display = df_raw.copy()
-    if "STATUS" in df_raw.columns:
-        df_display = df_display[df_display["STATUS"].astype(str).str.strip().str.upper() == "OPEN"]
-    if "QUANTITY" in df_raw.columns:
-        df_raw["QUANTITY"] = pd.to_numeric(df_raw["QUANTITY"], errors="coerce").fillna(0)
-        df_display = df_display[pd.to_numeric(df_display["QUANTITY"], errors="coerce") > 0]
-
-    if df_display.empty:
-        st.warning("Tidak ada item berstatus 'Open' dengan Qty > 0 di file ini.")
-        return
-
-    c_search, c_exp = st.columns([3, 1])
-    search_query = c_search.text_input("🔍 Cari (semua kolom: No. PR, Deskripsi, Lokasi, UOM, dll)...")
-
-    if c_exp.button("📂 Collapse All" if st.session_state["expand_all"] else "📂 Expand All", use_container_width=True):
-        st.session_state["expand_all"] = not st.session_state["expand_all"]
-        st.rerun()
-
-    locations = ["Semua Lokasi"]
-    if "LOCATION" in df_display.columns:
-        locations += list(df_display["LOCATION"].dropna().unique())
-
-    selected_loc = st.selectbox("📍 Filter Lokasi Pengiriman:", locations)
-
-    df_to_show = df_display.copy()
-    if search_query:
-        q = clean(search_query).lower()
-        search_cols = [c for c in df_to_show.columns if c != "ROW_KEY"]
-        mask = pd.Series(False, index=df_to_show.index)
-        for col in search_cols:
-            mask = mask | df_to_show[col].astype(str).str.lower().str.contains(q, na=False, regex=False)
-        df_to_show = df_to_show[mask]
-
-    if selected_loc != "Semua Lokasi" and "LOCATION" in df_to_show.columns:
-        df_to_show = df_to_show[df_to_show["LOCATION"] == selected_loc]
-
-    render_selection_and_review(df_to_show, df_display, already_published)
-
 
 # =====================================================================
 # UI: PROC - MONITORING & COMPARISON (detail dibungkus @st.fragment
