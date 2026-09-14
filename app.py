@@ -1179,7 +1179,7 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
             "awarding_items_text": items_text,
             "total_amount": f"{total_amount:,.0f}".replace(",", "."),
         }
-        letter_bytes, err = generate_letter_docx("templates/template_awarding.docx", context)
+        letter_bytes, err = generate_letter_docx("template/template_awarding.docx", context)
         if err:
             c2.caption(f"⚠️ {err}")
         elif letter_bytes:
@@ -1201,7 +1201,7 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
             "tanggal_rfq": tanggal_now,
             "vendor_name": v_name,
         }
-        letter_bytes, err = generate_letter_docx("templates/template_thanks.docx", context)
+        letter_bytes, err = generate_letter_docx("template/template_thanks.docx", context)
         if err:
             c2.caption(f"⚠️ {err}")
         elif letter_bytes:
