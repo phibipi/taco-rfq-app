@@ -191,7 +191,7 @@ def register_user(name, email_input, password, role):
         uid = created.user.id
 
         # Simpan email yang sudah dinormalisasi (rapi, trim, lowercase) ke DB profile
-        
+
         # kirim password (lihat mark_credentials_delivered()).
         profile_payload = {"id": uid, "email": normalized_email_str, "role": role, "vendor_name": name}
         if role == "vendor":
@@ -303,7 +303,7 @@ def reset_user_password(user_id, new_password):
         return True, None
     except Exception as e:
         return False, str(e)
-        
+
 def mark_credentials_delivered(vendor_id):
     """Tandai vendor ini sudah pernah menerima info login (email+password) via undangan RFQ.
     Sekali dapat, dia gak akan di-reset otomatis lagi tiap ada RFQ baru -- supaya passwordnya
@@ -641,7 +641,7 @@ def get_vendor_documents(pr_id, vendor_id=None):
     return res.data
 
 
-def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-", round_num=1):
+def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-", round_num=1, vendor_ref_no=None):
     try:
         # Cek apakah sudah ada quote di ROUND yang sama untuk assignment ini
         existing = (
@@ -662,6 +662,8 @@ def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, re
             "spec_vendor": clean(spec_vendor) or "-",
             "round": round_num,
         }
+        if vendor_ref_no is not None:
+            payload["vendor_ref_no"] = clean(vendor_ref_no) or "-"
 
         if existing.data:
             quote_id = existing.data[0]["id"]
@@ -727,6 +729,430 @@ def request_nego(pr_id, vendor_ids, note=""):
         return notified
     except Exception:
         return 0
+
+
+# =====================================================================
+# CUSTOM SPEC PARAMETERS (reusable master list — PIC bisa nambah sendiri,
+# vendor tinggal pilih & isi value-nya). Berlaku per submission vendor
+# (satu set spesifikasi tambahan untuk seluruh item di RFQ tsb per round).
+# =====================================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def get_spec_parameter_master():
+    res = sb.table("spec_parameter_definitions").select("*").order("name").execute()
+    return pd.DataFrame(res.data) if res.data else pd.DataFrame(columns=["id", "name"])
+
+
+def get_or_create_spec_parameter(name):
+    name = clean(name)
+    if not name:
+        return None
+    existing = sb.table("spec_parameter_definitions").select("id").ilike("name", name).execute()
+    if existing.data:
+        return existing.data[0]["id"]
+    new_row = sb.table("spec_parameter_definitions").insert({"name": name}).execute()
+    get_spec_parameter_master.clear()
+    return new_row.data[0]["id"]
+
+
+def save_custom_specs(pr_id, vendor_id, round_num, specs_list):
+    """specs_list: [{"parameter_id":.., "parameter_name":.., "value":..}, ...]
+    Overwrite semua spesifikasi tambahan utk kombinasi pr_id+vendor_id+round ini."""
+    try:
+        sb.table("rfq_custom_specs").delete().eq("pr_id", pr_id).eq("vendor_id", vendor_id).eq("round", round_num).execute()
+        rows = [
+            {"pr_id": pr_id, "vendor_id": vendor_id, "round": round_num,
+             "parameter_id": s["parameter_id"], "value": clean(s["value"])}
+            for s in specs_list if s.get("parameter_id") and clean(s.get("value"))
+        ]
+        if rows:
+            sb.table("rfq_custom_specs").insert(rows).execute()
+        return True
+    except Exception as e:
+        st.warning(f"Gagal menyimpan spesifikasi tambahan: {e}")
+        return False
+
+
+def get_custom_specs(pr_id, vendor_id=None):
+    q = sb.table("rfq_custom_specs").select("*, profiles(vendor_name), spec_parameter_definitions(name)").eq("pr_id", pr_id)
+    if vendor_id:
+        q = q.eq("vendor_id", vendor_id)
+    res = q.execute()
+    rows = []
+    for r in res.data or []:
+        rows.append({
+            "vendor_id": r.get("vendor_id"),
+            "vendor_name": (r.get("profiles") or {}).get("vendor_name", "-"),
+            "round": r.get("round"),
+            "parameter": (r.get("spec_parameter_definitions") or {}).get("name", "-"),
+            "value": r.get("value"),
+        })
+    return rows
+
+
+def render_custom_spec_editor(widget_key_prefix):
+    """UI reusable: tambah/hapus baris parameter+value custom secara dinamis.
+    Vendor pilih dari master list yang sudah ada, atau ketik nama baru (otomatis
+    kesimpen ke master list biar bisa dipakai lagi di RFQ lain).
+    Return list of {"parameter_id", "parameter_name", "value"} dari session_state."""
+    state_key = f"custom_specs_{widget_key_prefix}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = []
+
+    master_df = get_spec_parameter_master()
+    master_names = master_df["name"].tolist() if not master_df.empty else []
+
+    st.markdown("###### ➕ Spesifikasi Tambahan (Opsional — berlaku untuk semua item di RFQ ini)")
+    st.caption("Pilih dari daftar yang sudah pernah dibuat, atau ketik nama baru untuk menambah pilihan ke daftar.")
+
+    c1, c2, c3 = st.columns([2, 2, 1])
+    with c1:
+        param_choice = st.selectbox(
+            "Parameter", ["-- Tambah Baru --"] + master_names, key=f"{widget_key_prefix}_param_choice"
+        )
+        new_param_name = ""
+        if param_choice == "-- Tambah Baru --":
+            new_param_name = clean(st.text_input("Nama Parameter Baru", key=f"{widget_key_prefix}_new_param"))
+    with c2:
+        spec_value = clean(st.text_input("Isi Value", key=f"{widget_key_prefix}_value"))
+    with c3:
+        st.write(" ")
+        st.write(" ")
+        if st.button("➕ Tambah", key=f"{widget_key_prefix}_add_btn", use_container_width=True):
+            final_name = new_param_name if param_choice == "-- Tambah Baru --" else param_choice
+            if final_name and spec_value:
+                param_id = get_or_create_spec_parameter(final_name)
+                st.session_state[state_key].append(
+                    {"parameter_id": param_id, "parameter_name": final_name, "value": spec_value}
+                )
+                st.rerun(scope="fragment")
+            else:
+                st.warning("Isi nama parameter & value dulu.")
+
+    if st.session_state[state_key]:
+        for i, row in enumerate(st.session_state[state_key]):
+            rc1, rc2, rc3 = st.columns([2, 2, 1])
+            rc1.write(f"**{row['parameter_name']}**")
+            rc2.write(row["value"])
+            if rc3.button("🗑️", key=f"{widget_key_prefix}_del_{i}"):
+                st.session_state[state_key].pop(i)
+                st.rerun(scope="fragment")
+
+    return st.session_state[state_key]
+
+
+# =====================================================================
+# MULTI-VENDOR SPLIT (kriteria custom per item + bobot; ranking cuma
+# bantu keputusan, persentase final tetap diisi manual oleh PIC)
+# =====================================================================
+def get_split_toggle_map(item_ids):
+    if not item_ids:
+        return {}
+    res = sb.table("item_split_toggle").select("item_id, is_split_enabled").in_("item_id", item_ids).execute()
+    return {r["item_id"]: bool(r.get("is_split_enabled")) for r in (res.data or [])}
+
+
+def set_split_toggle(item_id, enabled):
+    try:
+        sb.table("item_split_toggle").upsert(
+            {"item_id": item_id, "is_split_enabled": enabled}, on_conflict="item_id"
+        ).execute()
+    except Exception as e:
+        st.warning(f"Gagal menyimpan toggle split: {e}")
+
+
+def get_split_criteria(item_id):
+    res = sb.table("item_split_criteria").select("*").eq("item_id", item_id).order("id").execute()
+    return res.data or []
+
+
+def add_split_criteria(item_id, name, weight):
+    try:
+        sb.table("item_split_criteria").insert(
+            {"item_id": item_id, "criteria_name": clean(name), "weight": weight}
+        ).execute()
+        return True
+    except Exception as e:
+        st.warning(f"Gagal menambah kriteria: {e}")
+        return False
+
+
+def get_split_scores(item_id):
+    res = sb.table("item_split_scores").select("*").eq("item_id", item_id).execute()
+    scores = {}
+    for r in res.data or []:
+        scores[(r["vendor_id"], r["criteria_id"])] = r.get("score", 0)
+    return scores
+
+
+def save_split_score(item_id, vendor_id, criteria_id, score):
+    try:
+        sb.table("item_split_scores").upsert(
+            {"item_id": item_id, "vendor_id": vendor_id, "criteria_id": criteria_id, "score": score},
+            on_conflict="item_id,vendor_id,criteria_id",
+        ).execute()
+    except Exception as e:
+        st.warning(f"Gagal menyimpan skor: {e}")
+
+
+def get_split_allocation_map(item_ids):
+    if not item_ids:
+        return {}
+    res = (
+        sb.table("item_split_allocation")
+        .select("item_id, final_percentage, profiles(id, vendor_name)")
+        .in_("item_id", item_ids)
+        .execute()
+    )
+    out = {}
+    for r in res.data or []:
+        prof = r.get("profiles") or {}
+        out.setdefault(r["item_id"], []).append(
+            {"vendor_id": prof.get("id"), "vendor_name": prof.get("vendor_name", "Vendor"), "percentage": float(r.get("final_percentage") or 0)}
+        )
+    return out
+
+
+def save_split_allocation(item_id, allocations):
+    """allocations: list of {"vendor_id":.., "percentage":..} - overwrite semua alokasi utk item ini."""
+    try:
+        sb.table("item_split_allocation").delete().eq("item_id", item_id).execute()
+        rows = [
+            {"item_id": item_id, "vendor_id": a["vendor_id"], "final_percentage": a["percentage"]}
+            for a in allocations if a["percentage"] > 0 and a["vendor_id"]
+        ]
+        if rows:
+            sb.table("item_split_allocation").insert(rows).execute()
+        return True
+    except Exception as e:
+        st.warning(f"Gagal menyimpan alokasi split: {e}")
+        return False
+
+
+def render_multivendor_split_workspace(pr_id, pivot_items, df_m, vendor_list_sorted, split_toggle_map):
+    st.markdown("---")
+    st.markdown("##### 🔀 Multi-Vendor Split (Opsional per Item)")
+    st.caption(
+        "Aktifkan untuk item yang qty-nya perlu dibagi ke beberapa vendor. Tambahkan kriteria custom "
+        "& bobotnya, isi skor tiap vendor, lihat ranking sebagai bantuan, lalu isi sendiri persentase "
+        "final pembagian qty-nya (harus total 100%)."
+    )
+
+    for _, r in pivot_items.iterrows():
+        item_id = r["item_id"]
+        barang = r["Barang"]
+        rows_for_item = df_m[df_m["Barang"] == barang]
+        vendors_for_item = sorted(rows_for_item["vendor"].unique().tolist())
+        vendor_name_to_id = {row["vendor"]: row["vendor_id"] for _, row in rows_for_item.iterrows()}
+
+        with st.expander(f"🔀 {barang}"):
+            is_split = st.checkbox(
+                "Split item ini ke beberapa vendor",
+                value=split_toggle_map.get(item_id, False),
+                key=f"split_toggle_{item_id}",
+            )
+            if is_split != split_toggle_map.get(item_id, False):
+                set_split_toggle(item_id, is_split)
+                st.rerun(scope="fragment")
+
+            if not is_split:
+                continue
+
+            st.markdown("**1️⃣ Kriteria Penilaian & Bobot**")
+            criteria = get_split_criteria(item_id)
+            if criteria:
+                st.dataframe(
+                    pd.DataFrame(criteria)[["criteria_name", "weight"]].rename(
+                        columns={"criteria_name": "Kriteria", "weight": "Bobot"}
+                    ),
+                    hide_index=True, use_container_width=True,
+                )
+            cc1, cc2, cc3 = st.columns([2, 1, 1])
+            new_crit_name = cc1.text_input("Nama Kriteria Baru", key=f"new_crit_name_{item_id}")
+            new_crit_weight = cc2.number_input("Bobot", min_value=0, max_value=100, value=0, key=f"new_crit_weight_{item_id}")
+            cc3.write(" ")
+            cc3.write(" ")
+            if cc3.button("➕ Tambah Kriteria", key=f"add_crit_{item_id}"):
+                if new_crit_name:
+                    add_split_criteria(item_id, new_crit_name, new_crit_weight)
+                    st.rerun(scope="fragment")
+                else:
+                    st.warning("Isi nama kriteria dulu.")
+
+            if not criteria:
+                st.info("Tambahkan minimal 1 kriteria dulu untuk mulai isi skor vendor.")
+                continue
+
+            st.markdown("**2️⃣ Skor Vendor per Kriteria**")
+            existing_scores = get_split_scores(item_id)
+            score_rows = []
+            for v in vendors_for_item:
+                v_id = vendor_name_to_id.get(v)
+                row = {"Vendor": v}
+                for c in criteria:
+                    row[c["criteria_name"]] = existing_scores.get((v_id, c["id"]), 0)
+                score_rows.append(row)
+            df_scores = pd.DataFrame(score_rows)
+            edited_scores = st.data_editor(
+                df_scores, hide_index=True, use_container_width=True,
+                disabled=["Vendor"], key=f"score_editor_{item_id}",
+            )
+
+            if st.button("💾 Simpan Skor", key=f"save_scores_{item_id}"):
+                for _, srow in edited_scores.iterrows():
+                    v_id = vendor_name_to_id.get(srow["Vendor"])
+                    for c in criteria:
+                        save_split_score(item_id, v_id, c["id"], float(srow[c["criteria_name"]] or 0))
+                st.success("Skor tersimpan.")
+                st.rerun(scope="fragment")
+
+            total_weight = sum(c["weight"] for c in criteria) or 1
+            ranking_rows = []
+            for _, srow in edited_scores.iterrows():
+                weighted = sum(float(srow[c["criteria_name"]] or 0) * c["weight"] for c in criteria) / total_weight
+                ranking_rows.append({"Vendor": srow["Vendor"], "Skor Terbobot": round(weighted, 1)})
+            df_ranking = pd.DataFrame(ranking_rows).sort_values("Skor Terbobot", ascending=False).reset_index(drop=True)
+            df_ranking.index = df_ranking.index + 1
+            st.markdown("**3️⃣ Ranking (bantu keputusan — bukan otomatis dipakai)**")
+            st.dataframe(df_ranking, use_container_width=True)
+
+            st.markdown("**4️⃣ Alokasi Qty Final (isi manual sesuai ranking & jumlah vendor)**")
+            existing_alloc = {a["vendor_name"]: a["percentage"] for a in get_split_allocation_map([item_id]).get(item_id, [])}
+            alloc_rows = [{"Vendor": v, "Persentase (%)": existing_alloc.get(v, 0.0)} for v in vendors_for_item]
+            df_alloc = pd.DataFrame(alloc_rows)
+            edited_alloc = st.data_editor(
+                df_alloc, hide_index=True, use_container_width=True,
+                disabled=["Vendor"], key=f"alloc_editor_{item_id}",
+                column_config={"Persentase (%)": st.column_config.NumberColumn(min_value=0, max_value=100, step=1)},
+            )
+            total_pct = edited_alloc["Persentase (%)"].sum()
+            st.caption(f"Total saat ini: **{total_pct:.0f}%** (harus 100% biar bisa disimpan)")
+
+            if st.button("💾 Simpan Alokasi %", key=f"save_alloc_{item_id}", disabled=(total_pct != 100)):
+                allocations = [
+                    {"vendor_id": vendor_name_to_id.get(row["Vendor"]), "percentage": row["Persentase (%)"]}
+                    for _, row in edited_alloc.iterrows()
+                ]
+                save_split_allocation(item_id, allocations)
+                st.success("Alokasi tersimpan & langsung dipakai di tabel CQR & Split PO di atas.")
+                st.rerun(scope="fragment")
+
+
+# =====================================================================
+# AWARDING LETTER & THANK YOU LETTER (docxtpl, download langsung)
+# =====================================================================
+def generate_letter_docx(template_path, context):
+    try:
+        from docxtpl import DocxTemplate
+    except ImportError:
+        return None, "Library `docxtpl` belum terinstall (tambahkan ke requirements.txt)."
+    try:
+        doc = DocxTemplate(template_path)
+        doc.render(context)
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        return buf.getvalue(), None
+    except FileNotFoundError:
+        return None, f"Template tidak ditemukan di `{template_path}`."
+    except Exception as e:
+        return None, str(e)
+
+
+def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name):
+    st.markdown("##### 📜 Awarding Letter & Thank You Letter")
+    st.caption(
+        "Download surat pemberitahuan pemenang untuk vendor yang menang, dan surat terima kasih "
+        "untuk vendor yang tidak menang di RFQ ini. Nomor referensi surat diambil dari Nomor SPH "
+        "yang diisi vendor saat submit penawaran."
+    )
+
+    winner_items = {}  # vendor_name -> list of item dicts
+    for _, r in pivot_items.iterrows():
+        item_id = r["item_id"]
+        barang = r["Barang"]
+        if split_toggle_map.get(item_id) and split_allocation_map.get(item_id):
+            for a in split_allocation_map[item_id]:
+                match = df_m[(df_m["Barang"] == barang) & (df_m["vendor"] == a["vendor_name"])]
+                if match.empty:
+                    continue
+                unit_price = float(match.iloc[0]["price"])
+                alloc_qty = float(r["Qty"] or 0) * (a["percentage"] / 100.0)
+                winner_items.setdefault(a["vendor_name"], []).append({
+                    "barang": barang, "qty": round(alloc_qty, 2), "uom": r["UOM"],
+                    "unit_price": unit_price, "total": unit_price * alloc_qty,
+                })
+        else:
+            best_v = recommended_vendor_per_item.get(barang)
+            if not best_v or str(best_v).startswith("🔀"):
+                continue
+            match = df_m[(df_m["Barang"] == barang) & (df_m["vendor"] == best_v)]
+            if match.empty:
+                continue
+            row_val = match.iloc[0]
+            winner_items.setdefault(best_v, []).append({
+                "barang": barang, "qty": r["Qty"], "uom": r["UOM"],
+                "unit_price": row_val["price"], "total": row_val["total"],
+            })
+
+    all_vendor_names = sorted(df_m["vendor"].unique().tolist())
+    losing_vendors = [v for v in all_vendor_names if v not in winner_items]
+
+    tanggal_now = datetime.now().strftime("%d %B %Y")
+    rfq_title = pr_info.get("rfq_title") or pr_info["pr_code"]
+
+    st.markdown("**🏆 Vendor Pemenang**")
+    if not winner_items:
+        st.info("Belum ada vendor pemenang yang teridentifikasi untuk RFQ ini.")
+    for v_name, items in winner_items.items():
+        v_rows = df_m[df_m["vendor"] == v_name]
+        vendor_ref_no = v_rows["vendor_ref_no"].iloc[0] if not v_rows.empty else "-"
+        total_amount = sum(it["total"] for it in items)
+        items_text = "\n".join(
+            f"- {it['barang']} : {it['qty']} {it['uom']} x Rp {it['unit_price']:,.0f} = Rp {it['total']:,.0f}".replace(",", ".")
+            for it in items
+        )
+        c1, c2 = st.columns([3, 1])
+        c1.write(f"**{v_name}** — Total: Rp {total_amount:,.0f}".replace(",", "."))
+        context = {
+            "rfq_title": rfq_title,
+            "tanggal_rfq": tanggal_now,
+            "vendor_name": v_name,
+            "rfq_num": vendor_ref_no or "-",
+            "awarding_items_text": items_text,
+            "total_amount": f"{total_amount:,.0f}".replace(",", "."),
+        }
+        letter_bytes, err = generate_letter_docx("templates/template_awarding.docx", context)
+        if err:
+            c2.caption(f"⚠️ {err}")
+        elif letter_bytes:
+            c2.download_button(
+                "📥 Awarding Letter", letter_bytes,
+                f"Awarding_{v_name}_{rfq_title}.docx",
+                key=f"award_dl_{pr_info['id']}_{v_name}",
+                use_container_width=True,
+            )
+
+    st.markdown("**🙏 Vendor Tidak Menang (Thank You Letter)**")
+    if not losing_vendors:
+        st.caption("Tidak ada vendor lain di RFQ ini yang perlu dikirimi Thank You Letter.")
+    for v_name in losing_vendors:
+        c1, c2 = st.columns([3, 1])
+        c1.write(f"**{v_name}**")
+        context = {
+            "rfq_title": rfq_title,
+            "tanggal_rfq": tanggal_now,
+            "vendor_name": v_name,
+        }
+        letter_bytes, err = generate_letter_docx("templates/template_thanks.docx", context)
+        if err:
+            c2.caption(f"⚠️ {err}")
+        elif letter_bytes:
+            c2.download_button(
+                "📥 Thank You Letter", letter_bytes,
+                f"ThankYou_{v_name}_{rfq_title}.docx",
+                key=f"thanks_dl_{pr_info['id']}_{v_name}",
+                use_container_width=True,
+            )
 
 
 # =====================================================================
@@ -1654,6 +2080,7 @@ def render_comparison_detail(pr_info):
             "warranty": q.get("warranty", "-"),
             "top_days": v_profile.get("top_days") or 0,
             "round": q_round,
+            "vendor_ref_no": q.get("vendor_ref_no", "-"),
         })
 
     if not data_matrix:
@@ -1670,19 +2097,42 @@ def render_comparison_detail(pr_info):
     recommended_total = 0
     worst_case_total = 0
 
+    # -----------------------------------------------------------------
+    # MULTI-VENDOR SPLIT: item mana saja yang di-toggle "split" oleh PIC
+    # -----------------------------------------------------------------
+    split_item_ids = [r["item_id"] for r in pivot_items.to_dict("records")]
+    split_toggle_map = get_split_toggle_map(split_item_ids)
+    split_allocation_map = get_split_allocation_map(split_item_ids)  # {item_id: [{"vendor_id":..,"vendor_name":..,"percentage":..}, ...]}
+
     for idx, r in pivot_items.iterrows():
+        item_id = r["item_id"]
         rows_for_item = df_m[df_m["Barang"] == r["Barang"]].copy()
         rows_for_item = rows_for_item.rename(columns={
             "price": "unit_price", "lead_time": "lead_time_days",
         })
-        scored = compute_recommendation(rows_for_item, w_price, w_top, w_stock, w_leadtime)
 
-        best_row = scored[scored["is_recommended"]].iloc[0] if not scored.empty and scored["is_recommended"].any() else None
-        if best_row is not None:
-            recommended_vendor_per_item[r["Barang"]] = best_row["vendor"]
-            recommended_total += float(best_row["unit_price"]) * float(r["Qty"] or 0)
-        if not rows_for_item.empty:
-            worst_case_total += float(rows_for_item["unit_price"].max()) * float(r["Qty"] or 0)
+        is_split = bool(split_toggle_map.get(item_id))
+
+        if is_split and split_allocation_map.get(item_id):
+            # Multi-vendor: total item dihitung dari alokasi % manual PIC, bukan single winner
+            allocs = split_allocation_map[item_id]
+            recommended_vendor_per_item[r["Barang"]] = "🔀 Split (" + ", ".join(a["vendor_name"] for a in allocs) + ")"
+            for a in allocs:
+                match = rows_for_item[rows_for_item["vendor"] == a["vendor_name"]]
+                if not match.empty:
+                    unit_price = float(match.iloc[0]["unit_price"])
+                    alloc_qty = float(r["Qty"] or 0) * (a["percentage"] / 100.0)
+                    recommended_total += unit_price * alloc_qty
+            if not rows_for_item.empty:
+                worst_case_total += float(rows_for_item["unit_price"].max()) * float(r["Qty"] or 0)
+        else:
+            scored = compute_recommendation(rows_for_item, w_price, w_top, w_stock, w_leadtime)
+            best_row = scored[scored["is_recommended"]].iloc[0] if not scored.empty and scored["is_recommended"].any() else None
+            if best_row is not None:
+                recommended_vendor_per_item[r["Barang"]] = best_row["vendor"]
+                recommended_total += float(best_row["unit_price"]) * float(r["Qty"] or 0)
+            if not rows_for_item.empty:
+                worst_case_total += float(rows_for_item["unit_price"].max()) * float(r["Qty"] or 0)
 
         for v in vendor_list_sorted:
             match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == v)]
@@ -1767,8 +2217,33 @@ def render_comparison_detail(pr_info):
     summary_df = build_vendor_summary(df_m, vendor_list_sorted)
     st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
+    # -----------------------------------------------------------------
+    # 🔀 MULTI-VENDOR SPLIT WORKSPACE (per item, opsional)
+    # -----------------------------------------------------------------
+    render_multivendor_split_workspace(active_id, pivot_items, df_m, vendor_list_sorted, split_toggle_map)
+    # Refresh alokasi (kalau ada perubahan baru saja disimpan di fragment atas)
+    split_allocation_map = get_split_allocation_map(split_item_ids)
+
     split_data = {}
     for _, r in pivot_items.iterrows():
+        item_id = r["item_id"]
+        if split_toggle_map.get(item_id) and split_allocation_map.get(item_id):
+            for a in split_allocation_map[item_id]:
+                match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == a["vendor_name"])]
+                if match.empty:
+                    continue
+                row_val = match.iloc[0]
+                alloc_qty = float(r["Qty"] or 0) * (a["percentage"] / 100.0)
+                split_data.setdefault(a["vendor_name"], []).append({
+                    "Barang": r["Barang"],
+                    "Qty": round(alloc_qty, 2),
+                    "UOM": r["UOM"],
+                    "Brand": row_val["brand"],
+                    "Unit Price": row_val["price"],
+                    "Total": row_val["price"] * alloc_qty,
+                    "Lead Time (Hari)": row_val["lead_time"],
+                })
+            continue
         best_v = recommended_vendor_per_item.get(r["Barang"])
         if not best_v:
             continue
@@ -1873,6 +2348,15 @@ def render_comparison_detail(pr_info):
         )
     else:
         st.caption("⚠️ Library `reportlab` belum terinstall.")
+
+    # -----------------------------------------------------------------
+    # 📜 AWARDING & THANK YOU LETTER
+    # -----------------------------------------------------------------
+    st.divider()
+    render_awarding_section(
+        pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map,
+        pivot_items, df_m, vendor_id_to_name,
+    )
 
     if st.button("🔒 Mark as Submitted (Selesai & Arsip)", type="primary", use_container_width=True):
         try:
@@ -2167,6 +2651,12 @@ def proc_portal_manual_input():
 
     manual_key = f"manual_{pr_id}_{sel_vendor_id}"
 
+    vendor_ref_no_val = clean(st.text_input(
+        "🔖 Nomor SPH Vendor (Wajib)",
+        key=f"vendor_ref_{manual_key}",
+        help="Nomor SPH vendor. Kalau tidak ada nomor, tulis tanggal SPH-nya.",
+    ))
+
     st.markdown("##### 📎 Upload PDF Quotation Vendor (Opsional — isi tabel otomatis)")
     ocr_pdf = st.file_uploader("Upload PDF penawaran vendor", type=["pdf"], key=f"ocr_pdf_{manual_key}")
     if ocr_pdf is not None and st.button("🔍 Read", key=f"ocr_btn_{manual_key}"):
@@ -2255,25 +2745,28 @@ def proc_portal_manual_input():
             st.caption(f"📄 {d['file_name']} — {d['uploaded_at'][:10]}")
 
     if st.button("💾 Simpan Penawaran Vendor Ini", type="primary", use_container_width=True):
-        all_ok = True
-        for idx, r in edited.iterrows():
-            ass_id = df_preview.iloc[idx]["assignment_id"]
-            ok, err = submit_quote(
-                ass_id, sel_vendor_id,
-                r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
-                r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
-                round_num=current_round,
-            )
-            if not ok:
-                all_ok = False
-                st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
+        if not vendor_ref_no_val:
+            st.error("❌ Mohon isi Nomor SPH Vendor terlebih dahulu!")
+        else:
+            all_ok = True
+            for idx, r in edited.iterrows():
+                ass_id = df_preview.iloc[idx]["assignment_id"]
+                ok, err = submit_quote(
+                    ass_id, sel_vendor_id,
+                    r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
+                    r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
+                    round_num=current_round, vendor_ref_no=vendor_ref_no_val,
+                )
+                if not ok:
+                    all_ok = False
+                    st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
 
-        if all_ok:
-            if official_doc is not None:
-                upload_vendor_document(pr_id, sel_vendor_id, official_doc)
-            st.success(f"🎉 Penawaran atas nama {vendor_name} berhasil disimpan!")
-            st.session_state.pop(f"ocr_result_{manual_key}", None)
-            st.rerun()
+            if all_ok:
+                if official_doc is not None:
+                    upload_vendor_document(pr_id, sel_vendor_id, official_doc)
+                st.success(f"🎉 Penawaran atas nama {vendor_name} berhasil disimpan!")
+                st.session_state.pop(f"ocr_result_{manual_key}", None)
+                st.rerun()
 
 
 # =====================================================================
@@ -2560,6 +3053,12 @@ def vendor_portal(vendor_id):
             if attachments:
                 st.markdown("**📎 File Referensi Lampiran:** " + ", ".join(f"`{a['file_name']}`" for a in attachments))
 
+            vendor_ref_no_val = clean(st.text_input(
+                "🔖 Nomor SPH Anda (Wajib)",
+                key=f"vendor_ref_{active_rfq_id}",
+                help="Isi nomor SPH (Surat Penawaran Harga) Anda. Kalau tidak ada nomor, tulis tanggal SPH-nya.",
+            ))
+
             st.markdown("##### 📎 Upload PDF Quotation (Opsional — isi tabel otomatis)")
             ocr_pdf = st.file_uploader(
                 "Upload PDF penawaran untuk dicopy ke tabel", type=["pdf"], key=f"ocr_pdf_{active_rfq_id}"
@@ -2685,7 +3184,9 @@ def vendor_portal(vendor_id):
 
             if st.button("🚀 Kirim Penawaran", type="primary", use_container_width=True):
                 has_doc = official_doc is not None or bool(existing_docs)
-                if not has_doc:
+                if not vendor_ref_no_val:
+                    st.error("❌ Mohon isi Nomor SPH Anda dulu sebelum mengirim penawaran.")
+                elif not has_doc:
                     st.error("❌ Mohon upload PDF quotation resmi (kop surat/tandatangan) dulu sebelum mengirim penawaran.")
                 else:
                     all_ok = True
@@ -2695,7 +3196,7 @@ def vendor_portal(vendor_id):
                             ass_id, vendor_id,
                             r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
                             r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
-                            round_num=current_round,
+                            round_num=current_round, vendor_ref_no=vendor_ref_no_val,
                         )
                         if not ok:
                             all_ok = False
