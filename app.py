@@ -530,7 +530,38 @@ def compute_recommendation(df_item, w_price, w_top, w_stock, w_leadtime):
     d["score"] = d["score"].round(1)
     d["is_recommended"] = d["score"] == d["score"].max()
     return d
+# =====================================================================
+# TEMPLATE EMAIL AWARDING & THANK YOU
+# =====================================================================
+DEFAULT_AWARDING_EMAIL_TEMPLATE = """Dear Tim {vendor_name},
 
+Selamat! Berdasarkan hasil evaluasi komersial dan teknis untuk RFQ: {rfq_title}, perusahaan Anda dinyatakan sebagai PEMENANG TENDER.
+
+Rincian Barang & Alokasi Qty:
+{awarding_items_text}
+
+Total Nominal: Rp {total_amount}
+
+INFORMASI SELANJUTNYA:
+Official Purchase Order (PO) resmi akan diterbitkan dan dikirimkan oleh tim Procurement TACO ke email Anda dalam waktu dekat. Mohon dapat mempersiapkan proses pengiriman/eksekusi barang.
+
+Terima kasih atas kerja samanya.
+
+Salam,
+TACO Procurement Team
+"""
+
+DEFAULT_THANKYOU_EMAIL_TEMPLATE = """Dear Tim {vendor_name},
+
+Terima kasih atas partisipasi Anda dalam penawaran harga untuk RFQ: {rfq_title}.
+
+Melalui surat ini kami menginformasikan bahwa untuk paket pengadaan kali ini, panitia procurement telah memilih penyedia jasa/barang lainnya yang lebih sesuai dengan kriteria evaluasi kami.
+
+Kami sangat mengapresiasi waktu dan penawaran yang telah Anda berikan, dan berharap dapat bekerja sama di paket pengadaan berikutnya.
+
+Salam,
+TACO Procurement Team
+"""
 
 def update_vendor_top(vendor_id, top_days):
     sb.table("profiles").update({"top_days": top_days}).eq("id", vendor_id).execute()
@@ -1116,14 +1147,18 @@ def generate_letter_docx(template_path, context):
         return None, str(e)
 
 
+# =====================================================================
+# 📜 AWARDING & THANK YOU LETTER + AUTOMATIC EMAIL BLAST
+# =====================================================================
 def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name):
-    st.markdown("##### 📜 Awarding Letter & Thank You Letter")
+    st.markdown("##### 📜 Awarding & Final Close RFQ")
     st.caption(
-        "Download surat pemberitahuan pemenang untuk vendor yang menang, dan surat terima kasih "
-        "untuk vendor yang tidak menang di RFQ ini. Nomor referensi surat diambil dari Nomor SPH "
-        "yang diisi vendor saat submit penawaran."
+        "Klik tombol di bawah untuk menyelesaikan RFQ ini. Sistem akan **otomatis mengirimkan email Awarding** "
+        "ke vendor pemenang (dilengkapi lampiran Word) dan **email Thank You** ke vendor lainnya, "
+        "sekaligus mengunci status RFQ."
     )
 
+    # 1. Identifikasi Pemenang & Barang yang Dimenangkan
     winner_items = {}  # vendor_name -> list of item dicts
     for _, r in pivot_items.iterrows():
         item_id = r["item_id"]
@@ -1131,7 +1166,7 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
         if split_toggle_map.get(item_id) and split_allocation_map.get(item_id):
             for a in split_allocation_map[item_id]:
                 match = df_m[(df_m["Barang"] == barang) & (df_m["vendor"] == a["vendor_name"])]
-                if match.empty:
+                if match.empty: 
                     continue
                 unit_price = float(match.iloc[0]["price"])
                 alloc_qty = float(r["Qty"] or 0) * (a["percentage"] / 100.0)
@@ -1141,10 +1176,10 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
                 })
         else:
             best_v = recommended_vendor_per_item.get(barang)
-            if not best_v or str(best_v).startswith("🔀"):
+            if not best_v or str(best_v).startswith("🔀"): 
                 continue
             match = df_m[(df_m["Barang"] == barang) & (df_m["vendor"] == best_v)]
-            if match.empty:
+            if match.empty: 
                 continue
             row_val = match.iloc[0]
             winner_items.setdefault(best_v, []).append({
@@ -1154,63 +1189,82 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
 
     all_vendor_names = sorted(df_m["vendor"].unique().tolist())
     losing_vendors = [v for v in all_vendor_names if v not in winner_items]
-
-    tanggal_now = datetime.now().strftime("%d %B %Y")
     rfq_title = pr_info.get("rfq_title") or pr_info["pr_code"]
+    tanggal_now = datetime.now().strftime("%d %B %Y")
 
-    st.markdown("**🏆 Vendor Pemenang**")
-    if not winner_items:
-        st.info("Belum ada vendor pemenang yang teridentifikasi untuk RFQ ini.")
-    for v_name, items in winner_items.items():
-        v_rows = df_m[df_m["vendor"] == v_name]
-        vendor_ref_no = v_rows["vendor_ref_no"].iloc[0] if not v_rows.empty else "-"
-        total_amount = sum(it["total"] for it in items)
-        items_text = "\n".join(
-            f"- {it['barang']} : {it['qty']} {it['uom']} x Rp {it['unit_price']:,.0f} = Rp {it['total']:,.0f}".replace(",", ".")
-            for it in items
-        )
-        c1, c2 = st.columns([3, 1])
-        c1.write(f"**{v_name}** — Total: Rp {total_amount:,.0f}".replace(",", "."))
-        context = {
-            "rfq_title": rfq_title,
-            "tanggal_rfq": tanggal_now,
-            "vendor_name": v_name,
-            "rfq_num": vendor_ref_no or "-",
-            "awarding_items_text": items_text,
-            "total_amount": f"{total_amount:,.0f}".replace(",", "."),
-        }
-        letter_bytes, err = generate_letter_docx("template/template_awarding.docx", context)
-        if err:
-            c2.caption(f"⚠️ {err}")
-        elif letter_bytes:
-            c2.download_button(
-                "📥 Awarding Letter", letter_bytes,
-                f"Awarding_{v_name}_{rfq_title}.docx",
-                key=f"award_dl_{pr_info['id']}_{v_name}",
-                use_container_width=True,
-            )
+    # Preview Ringkasan Vendor
+    c_w, c_l = st.columns(2)
+    with c_w:
+        st.write("**🏆 Vendor Pemenang (Menerima Awarding Email):**")
+        if not winner_items:
+            st.caption("_Belum ada vendor pemenang yang teridentifikasi._")
+        for v_name, items in winner_items.items():
+            tot = sum(it["total"] for it in items)
+            st.caption(f"• **{v_name}** — Total: Rp {tot:,.0f}".replace(",", "."))
+    with c_l:
+        st.write("**🙏 Vendor Lain (Menerima Thank You Email):**")
+        if not losing_vendors:
+            st.caption("_Tidak ada vendor lain di RFQ ini._")
+        for v_name in losing_vendors:
+            st.caption(f"• **{v_name}**")
 
-    st.markdown("**🙏 Vendor Tidak Menang (Thank You Letter)**")
-    if not losing_vendors:
-        st.caption("Tidak ada vendor lain di RFQ ini yang perlu dikirimi Thank You Letter.")
-    for v_name in losing_vendors:
-        c1, c2 = st.columns([3, 1])
-        c1.write(f"**{v_name}**")
-        context = {
-            "rfq_title": rfq_title,
-            "tanggal_rfq": tanggal_now,
-            "vendor_name": v_name,
-        }
-        letter_bytes, err = generate_letter_docx("template/template_thanks.docx", context)
-        if err:
-            c2.caption(f"⚠️ {err}")
-        elif letter_bytes:
-            c2.download_button(
-                "📥 Thank You Letter", letter_bytes,
-                f"ThankYou_{v_name}_{rfq_title}.docx",
-                key=f"thanks_dl_{pr_info['id']}_{v_name}",
-                use_container_width=True,
-            )
+    st.write(" ")
+    
+    # 2. Eksekusi Blast Email & Close RFQ
+    if st.button("🚀 Close RFQ & Kirim Email Notifikasi ke Semua Vendor", type="primary", use_container_width=True):
+        with st.spinner("Mengunci RFQ & memproses pengiriman email notifikasi ke semua vendor..."):
+            name_to_id = {v: k for k, v in vendor_id_to_name.items()}
+
+            # A. Kirim Email ke Vendor Pemenang + File Word Attachment
+            for v_name, items in winner_items.items():
+                v_id = name_to_id.get(v_name)
+                v_rows = df_m[df_m["vendor"] == v_name]
+                vendor_ref_no = v_rows["vendor_ref_no"].iloc[0] if not v_rows.empty else "-"
+                
+                v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
+                v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
+
+                if v_email:
+                    total_amount = sum(it["total"] for it in items)
+                    items_text = "\n".join(
+                        f"- {it['barang']} ({it['qty']} {it['uom']}) @ Rp {it['unit_price']:,.0f} = Rp {it['total']:,.0f}".replace(",", ".")
+                        for it in items
+                    )
+                    
+                    context = {
+                        "rfq_title": rfq_title, "tanggal_rfq": tanggal_now,
+                        "vendor_name": v_name, "rfq_num": vendor_ref_no or "-",
+                        "awarding_items_text": items_text, "total_amount": f"{total_amount:,.0f}".replace(",", "."),
+                    }
+                    letter_bytes, _ = generate_letter_docx("templates/template_awarding.docx", context)
+                    
+                    email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
+                        vendor_name=v_name, rfq_title=rfq_title,
+                        awarding_items_text=items_text, total_amount=total_amount
+                    )
+                    attachments = [(f"Awarding_Letter_{v_name}.docx", letter_bytes)] if letter_bytes else None
+                    send_custom_email(v_email, f"🎉 AWARDING LETTER - RFQ: {rfq_title}", email_body, attachments)
+
+            # B. Kirim Email Thank You ke Vendor Lain
+            for v_name in losing_vendors:
+                v_id = name_to_id.get(v_name)
+                v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
+                v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
+
+                if v_email:
+                    email_body = DEFAULT_THANKYOU_EMAIL_TEMPLATE.format(vendor_name=v_name, rfq_title=rfq_title)
+                    send_custom_email(v_email, f"Hasil Evaluasi RFQ: {rfq_title}", email_body)
+
+            # C. Update Status RFQ di Supabase
+            items_res = sb.table("pr_items").select("id").eq("pr_id", pr_info["id"]).execute()
+            item_ids = [i["id"] for i in items_res.data] if items_res.data else []
+            if item_ids:
+                sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
+
+        st.toast("RFQ Berhasil Di-close dan Email Terkirim!", icon="🎉")
+        st.success("✅ Seluruh email notifikasi & Surat Awarding telah terkirim secara otomatis!")
+        st.session_state["active_compare_pr_id"] = None
+        st.rerun()
 
 
 # =====================================================================
