@@ -928,25 +928,39 @@ def save_split_allocation(item_id, allocations):
         return False
 
 
+# =====================================================================
+# MULTI-VENDOR SPLIT WORKSPACE (DENGAN INPUT RANKING 1,2,3... & BOBOT %)
+# =====================================================================
 def render_multivendor_split_workspace(pr_id, pivot_items, df_m, vendor_list_sorted, split_toggle_map):
     st.markdown("---")
-    st.markdown("##### 🔀 Multi-Vendor Split (Opsional per Item)")
+    
+    # Checkbox Utama: Hanya munculkan fitur jika PIC sengaja mencentang
+    enable_split_feature = st.checkbox(
+        "🔀 Aktifkan Fitur Multi-Vendor Split Qty (Pembagian Order per Item)",
+        value=any(split_toggle_map.values()),
+        key=f"main_split_toggle_{pr_id}"
+    )
+
+    if not enable_split_feature:
+        return
+
     st.caption(
-        "Aktifkan untuk item yang qty-nya perlu dibagi ke beberapa vendor. Tambahkan kriteria custom "
-        "& bobotnya, isi skor tiap vendor, lihat ranking sebagai bantuan, lalu isi sendiri persentase "
-        "final pembagian qty-nya (harus total 100%)."
+        "💡 Pilih item yang ingin dibagi kuantitasnya ke beberapa vendor. "
+        "Masukkan **Bobot Kriteria (%)** dan **Ranking Vendor (1, 2, 3...)** untuk membantu menentukan alokasi % final."
     )
 
     for _, r in pivot_items.iterrows():
         item_id = r["item_id"]
         barang = r["Barang"]
+        total_qty = r["Qty"] or 0
         rows_for_item = df_m[df_m["Barang"] == barang]
         vendors_for_item = sorted(rows_for_item["vendor"].unique().tolist())
+        num_vendors = len(vendors_for_item)
         vendor_name_to_id = {row["vendor"]: row["vendor_id"] for _, row in rows_for_item.iterrows()}
 
-        with st.expander(f"🔀 {barang}"):
+        with st.expander(f"📦 Item: {barang} (Total Qty: {total_qty} {r['UOM']})"):
             is_split = st.checkbox(
-                "Split item ini ke beberapa vendor",
+                f"Split kuantitas untuk item '{barang}'",
                 value=split_toggle_map.get(item_id, False),
                 key=f"split_toggle_{item_id}",
             )
@@ -957,18 +971,22 @@ def render_multivendor_split_workspace(pr_id, pivot_items, df_m, vendor_list_sor
             if not is_split:
                 continue
 
-            st.markdown("**1️⃣ Kriteria Penilaian & Bobot**")
+            # -------------------------------------------------------------
+            # STEP 1: Kriteria & Bobot (%)
+            # -------------------------------------------------------------
+            st.markdown("**1️⃣ Kriteria Evaluasi & Bobot (%)**")
             criteria = get_split_criteria(item_id)
             if criteria:
                 st.dataframe(
                     pd.DataFrame(criteria)[["criteria_name", "weight"]].rename(
-                        columns={"criteria_name": "Kriteria", "weight": "Bobot"}
+                        columns={"criteria_name": "Kriteria / Parameter", "weight": "Bobot (%)"}
                     ),
                     hide_index=True, use_container_width=True,
                 )
+            
             cc1, cc2, cc3 = st.columns([2, 1, 1])
-            new_crit_name = cc1.text_input("Nama Kriteria Baru", key=f"new_crit_name_{item_id}")
-            new_crit_weight = cc2.number_input("Bobot", min_value=0, max_value=100, value=0, key=f"new_crit_weight_{item_id}")
+            new_crit_name = cc1.text_input("Nama Kriteria Baru (misal: Kualitas, Track Record)", key=f"new_crit_name_{item_id}")
+            new_crit_weight = cc2.number_input("Bobot (%)", min_value=0, max_value=100, value=0, key=f"new_crit_weight_{item_id}")
             cc3.write(" ")
             cc3.write(" ")
             if cc3.button("➕ Tambah Kriteria", key=f"add_crit_{item_id}"):
@@ -976,64 +994,104 @@ def render_multivendor_split_workspace(pr_id, pivot_items, df_m, vendor_list_sor
                     add_split_criteria(item_id, new_crit_name, new_crit_weight)
                     st.rerun(scope="fragment")
                 else:
-                    st.warning("Isi nama kriteria dulu.")
+                    st.warning("Isi nama kriteria terlebih dahulu.")
 
             if not criteria:
-                st.info("Tambahkan minimal 1 kriteria dulu untuk mulai isi skor vendor.")
+                st.info("Tambahkan minimal 1 kriteria penilaian di atas untuk mulai memasukkan ranking vendor.")
                 continue
 
-            st.markdown("**2️⃣ Skor Vendor per Kriteria**")
+            # -------------------------------------------------------------
+            # STEP 2: Input Ranking Vendor (1, 2, 3... Max = Jumlah Vendor)
+            # -------------------------------------------------------------
+            st.markdown(f"**2️⃣ Input Ranking Vendor per Kriteria (Rank 1 s/d {num_vendors})**")
+            st.caption("🏆 **Rank 1** = Terbaik | **Rank 2** = Terbaik Kedua, dst.")
+            
             existing_scores = get_split_scores(item_id)
             score_rows = []
             for v in vendors_for_item:
                 v_id = vendor_name_to_id.get(v)
                 row = {"Vendor": v}
                 for c in criteria:
-                    row[c["criteria_name"]] = existing_scores.get((v_id, c["id"]), 0)
+                    # Nilai di DB kita gunakan sebagai Rank (Default Rank 1)
+                    saved_rank = int(existing_scores.get((v_id, c["id"]), 1))
+                    row[c["criteria_name"]] = min(max(saved_rank, 1), num_vendors)
                 score_rows.append(row)
-            df_scores = pd.DataFrame(score_rows)
-            edited_scores = st.data_editor(
-                df_scores, hide_index=True, use_container_width=True,
-                disabled=["Vendor"], key=f"score_editor_{item_id}",
+            
+            df_ranks = pd.DataFrame(score_rows)
+
+            # Sediakan konfigurasi min/max rank di st.data_editor
+            rank_col_config = {
+                c["criteria_name"]: st.column_config.NumberColumn(
+                    f"{c['criteria_name']} (Rank)",
+                    help=f"Isi ranking 1 sampai {num_vendors}",
+                    min_value=1,
+                    max_value=num_vendors,
+                    step=1
+                ) for c in criteria
+            }
+
+            edited_ranks = st.data_editor(
+                df_ranks, 
+                hide_index=True, 
+                use_container_width=True,
+                disabled=["Vendor"], 
+                column_config=rank_col_config,
+                key=f"rank_editor_{item_id}",
             )
 
-            if st.button("💾 Simpan Skor", key=f"save_scores_{item_id}"):
-                for _, srow in edited_scores.iterrows():
+            if st.button("💾 Simpan Ranking", key=f"save_ranks_{item_id}"):
+                for _, srow in edited_ranks.iterrows():
                     v_id = vendor_name_to_id.get(srow["Vendor"])
                     for c in criteria:
-                        save_split_score(item_id, v_id, c["id"], float(srow[c["criteria_name"]] or 0))
-                st.success("Skor tersimpan.")
+                        rank_val = int(srow[c["criteria_name"]] or 1)
+                        save_split_score(item_id, v_id, c["id"], rank_val)
+                st.success("Ranking berhasil disimpan.")
                 st.rerun(scope="fragment")
 
+            # -------------------------------------------------------------
+            # STEP 3: Kalkulasi Skor Terbobot & Rekomendasi Ranking
+            # -------------------------------------------------------------
             total_weight = sum(c["weight"] for c in criteria) or 1
             ranking_rows = []
-            for _, srow in edited_scores.iterrows():
-                weighted = sum(float(srow[c["criteria_name"]] or 0) * c["weight"] for c in criteria) / total_weight
-                ranking_rows.append({"Vendor": srow["Vendor"], "Skor Terbobot": round(weighted, 1)})
-            df_ranking = pd.DataFrame(ranking_rows).sort_values("Skor Terbobot", ascending=False).reset_index(drop=True)
-            df_ranking.index = df_ranking.index + 1
-            st.markdown("**3️⃣ Ranking (bantu keputusan — bukan otomatis dipakai)**")
-            st.dataframe(df_ranking, use_container_width=True)
+            for _, srow in edited_ranks.iterrows():
+                # Konversi Rank ke Skor Sederhana (Rank 1 = 100, Rank 2 = 50, dst.) untuk pembobotan
+                weighted_score = sum((100 / float(srow[c["criteria_name"]] or 1)) * c["weight"] for c in criteria) / total_weight
+                ranking_rows.append({"Vendor": srow["Vendor"], "Skor Terbobot": round(weighted_score, 1)})
+            
+            df_ranking_calc = pd.DataFrame(ranking_rows).sort_values("Skor Terbobot", ascending=False).reset_index(drop=True)
+            df_ranking_calc.index = df_ranking_calc.index + 1
+            df_ranking_calc = df_ranking_calc.rename_axis("Hasil Ranking Vendor")
 
-            st.markdown("**4️⃣ Alokasi Qty Final (isi manual sesuai ranking & jumlah vendor)**")
+            st.markdown("**3️⃣ Hasil Kalkulasi Ranking Gabungan**")
+            st.dataframe(df_ranking_calc[["Vendor", "Skor Terbobot"]], use_container_width=True)
+
+            # -------------------------------------------------------------
+            # STEP 4: Input Manual Persentase (%) Alokasi PO Final
+            # -------------------------------------------------------------
+            st.markdown("**4️⃣ Alokasi Persentase Split PO Final (%)**")
             existing_alloc = {a["vendor_name"]: a["percentage"] for a in get_split_allocation_map([item_id]).get(item_id, [])}
-            alloc_rows = [{"Vendor": v, "Persentase (%)": existing_alloc.get(v, 0.0)} for v in vendors_for_item]
+            alloc_rows = [{"Vendor": v, "Alokasi Order (%)": existing_alloc.get(v, 0.0)} for v in vendors_for_item]
             df_alloc = pd.DataFrame(alloc_rows)
+            
             edited_alloc = st.data_editor(
-                df_alloc, hide_index=True, use_container_width=True,
-                disabled=["Vendor"], key=f"alloc_editor_{item_id}",
-                column_config={"Persentase (%)": st.column_config.NumberColumn(min_value=0, max_value=100, step=1)},
+                df_alloc, 
+                hide_index=True, 
+                use_container_width=True,
+                disabled=["Vendor"], 
+                key=f"alloc_editor_{item_id}",
+                column_config={"Alokasi Order (%)": st.column_config.NumberColumn(min_value=0, max_value=100, step=5)},
             )
-            total_pct = edited_alloc["Persentase (%)"].sum()
-            st.caption(f"Total saat ini: **{total_pct:.0f}%** (harus 100% biar bisa disimpan)")
+            
+            total_pct = edited_alloc["Alokasi Order (%)"].sum()
+            st.caption(f"Total Alokasi: **{total_pct:.0f}%** (Harus pas 100% untuk menyimpan)")
 
-            if st.button("💾 Simpan Alokasi %", key=f"save_alloc_{item_id}", disabled=(total_pct != 100)):
+            if st.button("💾 Simpan Alokasi % Split PO", key=f"save_alloc_{item_id}", disabled=(total_pct != 100)):
                 allocations = [
-                    {"vendor_id": vendor_name_to_id.get(row["Vendor"]), "percentage": row["Persentase (%)"]}
+                    {"vendor_id": vendor_name_to_id.get(row["Vendor"]), "percentage": row["Alokasi Order (%)"]}
                     for _, row in edited_alloc.iterrows()
                 ]
                 save_split_allocation(item_id, allocations)
-                st.success("Alokasi tersimpan & langsung dipakai di tabel CQR & Split PO di atas.")
+                st.success("Alokasi % Split PO berhasil disimpan!")
                 st.rerun(scope="fragment")
 
 
