@@ -1314,7 +1314,7 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
                     }
                     
                     # Generate PDF dari template Word
-                    pdf_bytes, err_pdf = generate_letter_pdf("templates/template_awarding.docx", context)
+                    pdf_bytes, err_pdf = generate_letter_pdf("template/template_awarding.docx", context)
                     
                     email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
                         vendor_name=v_name, rfq_title=rfq_title,
@@ -1339,7 +1339,7 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
                         "tanggal_rfq": tanggal_now,
                         "vendor_name": v_name
                     }
-                    pdf_thanks_bytes, _ = generate_letter_pdf("templates/template_thanks.docx", context)
+                    pdf_thanks_bytes, _ = generate_letter_pdf("template/template_thanks.docx", context)
                     
                     email_body = DEFAULT_THANKYOU_EMAIL_TEMPLATE.format(vendor_name=v_name, rfq_title=rfq_title)
                     attachments = [(f"Thank_You_Letter_{v_name}.pdf", pdf_thanks_bytes)] if pdf_thanks_bytes else None
