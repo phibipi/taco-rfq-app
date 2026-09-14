@@ -1171,22 +1171,62 @@ def render_multivendor_split_workspace(pr_id, pivot_items, df_m, vendor_list_sor
 # =====================================================================
 # AWARDING LETTER & THANK YOU LETTER (docxtpl, download langsung)
 # =====================================================================
-def generate_letter_docx(template_path, context):
+import subprocess
+import tempfile
+import os
+
+def generate_letter_pdf(template_path, context, output_filename="Letter.pdf"):
+    """
+    Render template DOCX pakai docxtpl, lalu convert langsung ke PDF via LibreOffice CLI.
+    Return: (bytes_pdf, error_message)
+    """
     try:
         from docxtpl import DocxTemplate
     except ImportError:
-        return None, "Library `docxtpl` belum terinstall (tambahkan ke requirements.txt)."
+        return None, "Library `docxtpl` belum terinstall di requirements.txt"
+
+    if not os.path.exists(template_path):
+        return None, f"File template `{template_path}` tidak ditemukan."
+
     try:
+        # 1. Render data ke file DOCX sementara
         doc = DocxTemplate(template_path)
         doc.render(context)
-        buf = io.BytesIO()
-        doc.save(buf)
-        buf.seek(0)
-        return buf.getvalue(), None
-    except FileNotFoundError:
-        return None, f"Template tidak ditemukan di `{template_path}`."
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_docx_path = os.path.join(tmpdir, "temp_render.docx")
+            doc.save(temp_docx_path)
+
+            # 2. Convert DOCX ke PDF pakai LibreOffice CLI
+            cmd = [
+                "libreoffice",
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", tmpdir,
+                temp_docx_path
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            temp_pdf_path = os.path.join(tmpdir, "temp_render.pdf")
+            
+            if os.path.exists(temp_pdf_path):
+                with open(temp_pdf_path, "rb") as f:
+                    pdf_bytes = f.read()
+                return pdf_bytes, None
+            else:
+                return None, "Gagal mengkonversi DOCX ke PDF (LibreOffice output not found)."
+
     except Exception as e:
-        return None, str(e)
+        # Fallback kalau libreoffice tidak tersedia di lokal/OS: kirim DOCX biasa
+        try:
+            doc = DocxTemplate(template_path)
+            doc.render(context)
+            buf = io.BytesIO()
+            doc.save(buf)
+            buf.seek(0)
+            return buf.getvalue(), f"LibreOffice error ({e}), dikirim fallback format DOCX."
+        except Exception as err_fallback:
+            return None, str(err_fallback)
 
 
 # =====================================================================
@@ -1196,20 +1236,18 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
     st.markdown("##### 📜 Awarding & Final Close RFQ")
     st.caption(
         "Klik tombol di bawah untuk menyelesaikan RFQ ini. Sistem akan **otomatis mengirimkan email Awarding** "
-        "ke vendor pemenang (dilengkapi lampiran Word) dan **email Thank You** ke vendor lainnya, "
-        "sekaligus mengunci status RFQ."
+        "ke vendor pemenang (dilengkapi lampiran PDF Surat Penunjukan) dan **email Thank You** ke vendor lainnya."
     )
 
-    # 1. Identifikasi Pemenang & Barang yang Dimenangkan
-    winner_items = {}  # vendor_name -> list of item dicts
+    # 1. Identifikasi Pemenang & Barang
+    winner_items = {}
     for _, r in pivot_items.iterrows():
         item_id = r["item_id"]
         barang = r["Barang"]
         if split_toggle_map.get(item_id) and split_allocation_map.get(item_id):
             for a in split_allocation_map[item_id]:
                 match = df_m[(df_m["Barang"] == barang) & (df_m["vendor"] == a["vendor_name"])]
-                if match.empty: 
-                    continue
+                if match.empty: continue
                 unit_price = float(match.iloc[0]["price"])
                 alloc_qty = float(r["Qty"] or 0) * (a["percentage"] / 100.0)
                 winner_items.setdefault(a["vendor_name"], []).append({
@@ -1218,11 +1256,9 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
                 })
         else:
             best_v = recommended_vendor_per_item.get(barang)
-            if not best_v or str(best_v).startswith("🔀"): 
-                continue
+            if not best_v or str(best_v).startswith("🔀"): continue
             match = df_m[(df_m["Barang"] == barang) & (df_m["vendor"] == best_v)]
-            if match.empty: 
-                continue
+            if match.empty: continue
             row_val = match.iloc[0]
             winner_items.setdefault(best_v, []).append({
                 "barang": barang, "qty": r["Qty"], "uom": r["UOM"],
@@ -1234,30 +1270,25 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
     rfq_title = pr_info.get("rfq_title") or pr_info["pr_code"]
     tanggal_now = datetime.now().strftime("%d %B %Y")
 
-    # Preview Ringkasan Vendor
     c_w, c_l = st.columns(2)
     with c_w:
-        st.write("**🏆 Vendor Pemenang (Menerima Awarding Email):**")
-        if not winner_items:
-            st.caption("_Belum ada vendor pemenang yang teridentifikasi._")
+        st.write("**🏆 Vendor Pemenang (Email + PDF Awarding Letter):**")
         for v_name, items in winner_items.items():
             tot = sum(it["total"] for it in items)
             st.caption(f"• **{v_name}** — Total: Rp {tot:,.0f}".replace(",", "."))
     with c_l:
-        st.write("**🙏 Vendor Lain (Menerima Thank You Email):**")
-        if not losing_vendors:
-            st.caption("_Tidak ada vendor lain di RFQ ini._")
+        st.write("**🙏 Vendor Lain (Email Thank You Letter):**")
         for v_name in losing_vendors:
             st.caption(f"• **{v_name}**")
 
     st.write(" ")
-    
-    # 2. Eksekusi Blast Email & Close RFQ
-    if st.button("🚀 Close RFQ & Kirim Email Notifikasi ke Semua Vendor", type="primary", use_container_width=True):
-        with st.spinner("Mengunci RFQ & memproses pengiriman email notifikasi ke semua vendor..."):
+
+    # 2. Tombol Blast Email + PDF
+    if st.button("🚀 Close RFQ & Auto-Send Email Notification + PDF", type="primary", use_container_width=True):
+        with st.spinner("Membuat PDF Surat Penunjukan & Mengirimkan Email ke Semua Vendor..."):
             name_to_id = {v: k for k, v in vendor_id_to_name.items()}
 
-            # A. Kirim Email ke Vendor Pemenang + File Word Attachment
+            # A. Kirim ke Vendor Pemenang (dengan Attachment PDF)
             for v_name, items in winner_items.items():
                 v_id = name_to_id.get(v_name)
                 v_rows = df_m[df_m["vendor"] == v_name]
@@ -1274,42 +1305,57 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
                     )
                     
                     context = {
-                        "rfq_title": rfq_title, "tanggal_rfq": tanggal_now,
-                        "vendor_name": v_name, "rfq_num": vendor_ref_no or "-",
-                        "awarding_items_text": items_text, "total_amount": f"{total_amount:,.0f}".replace(",", "."),
+                        "rfq_title": rfq_title, 
+                        "tanggal_rfq": tanggal_now,
+                        "vendor_name": v_name, 
+                        "rfq_num": vendor_ref_no or "-",
+                        "awarding_items_text": items_text, 
+                        "total_amount": f"{total_amount:,.0f}".replace(",", "."),
                     }
-                    letter_bytes, _ = generate_letter_docx("templates/template_awarding.docx", context)
+                    
+                    # Generate PDF dari template Word
+                    pdf_bytes, err_pdf = generate_letter_pdf("templates/template_awarding.docx", context)
                     
                     email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
-                        vendor_name=v_name,
-                        rfq_title=rfq_title,
-                        awarding_items_text=items_text,
+                        vendor_name=v_name, rfq_title=rfq_title,
+                        awarding_items_text=items_text, 
                         total_amount=f"{total_amount:,.0f}".replace(",", ".")
                     )
-                    attachments = [(f"Awarding_Letter_{v_name}.docx", letter_bytes)] if letter_bytes else None
+                    
+                    file_ext = "pdf" if (pdf_bytes and not err_pdf) else "docx"
+                    attachments = [(f"Awarding_Letter_{v_name}.{file_ext}", pdf_bytes)] if pdf_bytes else None
+                    
                     send_custom_email(v_email, f"🎉 AWARDING LETTER - RFQ: {rfq_title}", email_body, attachments)
 
-            # B. Kirim Email Thank You ke Vendor Lain
+            # B. Kirim Email Thank You ke Vendor Lain (opsional tambahkan PDF Thank You jika mau)
             for v_name in losing_vendors:
                 v_id = name_to_id.get(v_name)
                 v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
                 v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
 
                 if v_email:
+                    context = {
+                        "rfq_title": rfq_title,
+                        "tanggal_rfq": tanggal_now,
+                        "vendor_name": v_name
+                    }
+                    pdf_thanks_bytes, _ = generate_letter_pdf("templates/template_thanks.docx", context)
+                    
                     email_body = DEFAULT_THANKYOU_EMAIL_TEMPLATE.format(vendor_name=v_name, rfq_title=rfq_title)
-                    send_custom_email(v_email, f"Hasil Evaluasi RFQ: {rfq_title}", email_body)
+                    attachments = [(f"Thank_You_Letter_{v_name}.pdf", pdf_thanks_bytes)] if pdf_thanks_bytes else None
+                    
+                    send_custom_email(v_email, f"Hasil Evaluasi RFQ: {rfq_title}", email_body, attachments)
 
-            # C. Update Status RFQ di Supabase
+            # C. Update Status di Supabase
             items_res = sb.table("pr_items").select("id").eq("pr_id", pr_info["id"]).execute()
             item_ids = [i["id"] for i in items_res.data] if items_res.data else []
             if item_ids:
                 sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
 
-        st.toast("RFQ Berhasil Di-close dan Email Terkirim!", icon="🎉")
-        st.success("✅ Seluruh email notifikasi & Surat Awarding telah terkirim secara otomatis!")
+        st.toast("RFQ Berhasil Di-close dan Email Notifikasi PDF Terkirim!", icon="🎉")
+        st.success("✅ Seluruh email notifikasi beserta lampiran PDF resmi telah dikirim ke masing-masing vendor.")
         st.session_state["active_compare_pr_id"] = None
         st.rerun()
-
 
 # =====================================================================
 # AI OCR: BACA PDF QUOTATION VENDOR (GEMINI VISION)
