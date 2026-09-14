@@ -290,7 +290,49 @@ def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items
     except Exception as e:
         st.warning(f"⚠️ Notifikasi email gagal terkirim ke {vendor_email_str}: {e}")
         return False
+def send_custom_email(recipients_str, subject, body_text, pdf_attachments=None):
+    """
+    Kirim email kustom (Awarding / Thank You) dengan atau tanpa lampiran file (.docx / .pdf).
+    """
+    if "email_config" not in st.secrets:
+        st.error("Konfigurasi 'email_config' tidak ditemukan di st.secrets")
+        return False
 
+    sender_email = st.secrets["email_config"].get("smtp_user", "")
+    sender_password = st.secrets["email_config"].get("smtp_password", "")
+    if not sender_password or not sender_email:
+        st.error("'smtp_password' atau 'smtp_user' masih kosong di st.secrets")
+        return False
+
+    recipients = [clean(e).lower() for e in str(recipients_str).split(";") if clean(e)]
+    if not recipients:
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = sender_email
+        msg["To"] = ", ".join(recipients)
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body_text, "plain"))
+
+        if pdf_attachments:
+            for file_name, file_bytes in pdf_attachments:
+                if file_bytes:
+                    part = MIMEBase("application", "octet-stream")
+                    part.set_payload(file_bytes)
+                    encoders.encode_base64(part)
+                    part.add_header("Content-Disposition", f"attachment; filename={file_name}")
+                    msg.attach(part)
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, recipients, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        st.warning(f"⚠️ Notifikasi email gagal terkirim ke {recipients_str}: {e}")
+        return False
 
 def get_users_by_role(role):
     res = sb.table("profiles").select("*").eq("role", role).execute()
@@ -1239,8 +1281,10 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
                     letter_bytes, _ = generate_letter_docx("templates/template_awarding.docx", context)
                     
                     email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
-                        vendor_name=v_name, rfq_title=rfq_title,
-                        awarding_items_text=items_text, total_amount=total_amount
+                        vendor_name=v_name,
+                        rfq_title=rfq_title,
+                        awarding_items_text=items_text,
+                        total_amount=f"{total_amount:,.0f}".replace(",", ".")
                     )
                     attachments = [(f"Awarding_Letter_{v_name}.docx", letter_bytes)] if letter_bytes else None
                     send_custom_email(v_email, f"🎉 AWARDING LETTER - RFQ: {rfq_title}", email_body, attachments)
