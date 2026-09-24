@@ -164,16 +164,11 @@ def send_pic_welcome_email(pic_name, pic_email, password):
         return False
 
 
-def register_user(name, email_input, password, role):
-    """
-    role: 'admin', 'proc', atau 'vendor'
-    Untuk vendor: email_input bisa berisi multi-email dipisah ';' (misal: "a@v.com; b@v.com").
-    Email PERTAMA dipakai sebagai auth login utama Supabase.
-    """
+def register_user(name, email_input, password, role, vendor_code="-"):
     try:
         name = clean(name)
+        vendor_code = clean(vendor_code) or "-"
         raw_email_str = clean(email_input)
-        # Ambil & normalisasi (trim + lowercase) semua email, pisah ';'
         emails_list = [clean(e).lower() for e in raw_email_str.split(";") if clean(e)]
         if not emails_list:
             return False, "Email tidak valid."
@@ -190,15 +185,18 @@ def register_user(name, email_input, password, role):
         )
         uid = created.user.id
 
-        # Simpan email yang sudah dinormalisasi (rapi, trim, lowercase) ke DB profile
-
-        # kirim password (lihat mark_credentials_delivered()).
-        profile_payload = {"id": uid, "email": normalized_email_str, "role": role, "vendor_name": name}
+        profile_payload = {
+            "id": uid, 
+            "email": normalized_email_str, 
+            "role": role, 
+            "vendor_name": name,
+            "vendor_code": vendor_code # <--- Tambah vendor_code
+        }
         if role == "vendor":
             profile_payload["credentials_sent"] = False
+            
         sb.table("profiles").insert(profile_payload).execute()
 
-        # Jika yang didaftarkan adalah PIC Procurement, LANGSUNG kirim email info login
         if role == "proc":
             send_pic_welcome_email(name, primary_email, password)
 
@@ -213,15 +211,19 @@ def bulk_register_users(df, role):
     for _, row in df.iterrows():
         name = clean(row.get("name", ""))
         email = clean(row.get("email", "")).lower()
+        v_code = clean(row.get("code", row.get("vendor_code", "-"))) # <--- Baca kolom code/vendor_code
+        
         if not name or not email or "@" not in email:
-            results.append({"name": name, "email": email, "password": "-", "status": "❌ Data tidak valid"})
+            results.append({"name": name, "code": v_code, "email": email, "password": "-", "status": "❌ Data tidak valid"})
             continue
+            
         password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-        ok, err = register_user(name, email, password, role)
+        ok, err = register_user(name, email, password, role, vendor_code=v_code)
         if ok:
-            results.append({"name": name, "email": email, "password": password, "status": "✅ Berhasil"})
+            results.append({"name": name, "code": v_code, "email": email, "password": password, "status": "✅ Berhasil"})
         else:
-            results.append({"name": name, "email": email, "password": "-", "status": f"❌ {err}"})
+            results.append({"name": name, "code": v_code, "email": email, "password": "-", "status": f"❌ {err}"})
+            
     return pd.DataFrame(results)
 
 
