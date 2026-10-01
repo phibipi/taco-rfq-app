@@ -657,8 +657,13 @@ Salam,
 TACO Procurement Team
 """
 
-def update_vendor_top(vendor_id, top_days):
-    sb.table("profiles").update({"top_days": top_days}).eq("id", vendor_id).execute()
+def update_vendor_profile_info(vendor_id, top_days, pic_name, pic_jabatan):
+    sb.table("profiles").update({
+        "top_days": top_days,
+        "pic_name": clean(pic_name),
+        "pic_jabatan": clean(pic_jabatan),
+    }).eq("id", vendor_id).execute()
+    get_vendors_cached.clear()
 
 
 def get_history_data():
@@ -671,6 +676,8 @@ def get_history_data():
     for r in res.data:
         item = r.get("pr_items") or {}
         pr = item.get("purchase_requests") or {}
+        if not pr.get("is_archived"):
+            continue  # hanya RFQ yang sudah di-close
         vendor = r.get("profiles") or {}
         rows.append(
             {
@@ -1380,8 +1387,11 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
         lt_vals = [lt for lt in v_rows[v_rows["Barang"].isin(won_names)]["lead_time"] if lt]
         lead_time_days = max(lt_vals) if lt_vals else "-"
 
-        v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
-        v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
+        v_prof = sb.table("profiles").select("email, pic_name, pic_jabatan").eq("id", v_id).single().execute() if v_id else None
+        v_data = (v_prof.data or {}) if v_prof else {}
+        v_email = v_data.get("email")
+        v_pic_name = v_data.get("pic_name") or "-"
+        v_pic_jabatan = v_data.get("pic_jabatan") or "-"
 
         if v_email:
             total_amount = sum(it["total"] for it in items)
@@ -1401,7 +1411,9 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
                 "lead_time_days": lead_time_days,
                 "awarding_items_text": items_text,
                 "total_amount": f"{total_amount:,.0f}".replace(",", "."),
-                "pic": pic_name
+                "pic": pic_name,
+                "direktur": v_pic_name,
+                "jabatan": v_pic_jabatan
             }            
             pdf_bytes, err_pdf = generate_letter_pdf("template/template_awarding.docx", context)
             email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
@@ -3131,7 +3143,7 @@ def proc_portal_history():
 
     df_hist = get_history_data()
     if df_hist.empty:
-        st.info("Belum ada riwayat publikasi.")
+        st.info("Belum ada RFQ yang sudah di-close.")
         return
 
     df_hist["Tanggal Dibuat"] = pd.to_datetime(df_hist["Tanggal Dibuat"], errors="coerce")
@@ -3378,9 +3390,22 @@ def vendor_portal(vendor_id):
             st.divider()
             current_top = p_data.get("top_days") or 0
             new_top = st.number_input("TOP / Term of Payment Standard (Hari)", min_value=0, value=int(current_top), step=1)
-            if st.button("Simpan Data TOP", type="primary"):
-                update_vendor_top(vendor_id, new_top)
-                st.success("Term of Payment berhasil diperbarui!")
+
+            c_pic1, c_pic2 = st.columns(2)
+            new_pic_name = c_pic1.text_input(
+                "Nama PIC / Penandatangan",
+                value=p_data.get("pic_name") or "",
+                help="Nama yang akan muncul di kolom tanda tangan Surat Perintah Kerja.",
+            )
+            new_pic_jabatan = c_pic2.text_input(
+                "Jabatan",
+                value=p_data.get("pic_jabatan") or "",
+                placeholder="Contoh: Direktur",
+            )
+
+            if st.button("Simpan Data Supplier", type="primary"):
+                update_vendor_profile_info(vendor_id, new_top, new_pic_name, new_pic_jabatan)
+                st.success("Data supplier berhasil diperbarui!")
                 st.rerun()
 
     # -----------------------------------------------------------------
