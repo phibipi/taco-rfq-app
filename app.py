@@ -1476,11 +1476,10 @@ Jawab HANYA JSON array tanpa markdown:
     )
 
     def _call(model_name):
-    model = genai.GenerativeModel(
-        model_name,
-        generation_config=genai.GenerationConfig(temperature=0.3, max_output_tokens=1500),
-    )
-    return model.generate_content(prompt)
+        model = genai.GenerativeModel(model_name, generation_config=generation_config)
+        return model.generate_content(
+            [prompt, {"mime_type": "application/pdf", "data": pdf_bytes}]
+        )
 
     res, err = call_gemini_with_fallback(_call)
     if err:
