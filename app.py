@@ -629,15 +629,14 @@ def compute_recommendation(df_item, w_price, w_top, w_stock, w_leadtime):
 # =====================================================================
 DEFAULT_AWARDING_EMAIL_TEMPLATE = """Dear Tim {vendor_name},
 
-Selamat! Berdasarkan hasil evaluasi komersial dan teknis untuk RFQ: {rfq_title}, perusahaan Anda dinyatakan sebagai PEMENANG TENDER.
+Berdasarkan hasil evaluasi untuk RFQ: {rfq_title}, perusahaan Anda dinyatakan terpilih sebagai PEMENANG TENDER.
 
 Rincian Barang & Alokasi Qty:
 {awarding_items_text}
 
 Total Nominal: Rp {total_amount}
 
-INFORMASI SELANJUTNYA:
-Official Purchase Order (PO) resmi akan diterbitkan dan dikirimkan oleh tim Procurement TACO ke email Anda dalam waktu dekat. Mohon dapat mempersiapkan proses pengiriman/eksekusi barang.
+Mohon dapat mengecek lampiran Surat Perintah Kerja yang telah kami lampirkan, dan dapat segera mempersiapkan proses pengiriman.
 
 Terima kasih atas kerja samanya.
 
