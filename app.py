@@ -1402,7 +1402,8 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
                 "awarding_items_text": items_text,
                 "total_amount": f"{total_amount:,.0f}".replace(",", "."),
                 "pic": pic_name
-            }            pdf_bytes, err_pdf = generate_letter_pdf("template/template_awarding.docx", context)
+            }            
+            pdf_bytes, err_pdf = generate_letter_pdf("template/template_awarding.docx", context)
             email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
                 vendor_name=v_name, rfq_title=rfq_title,
                 awarding_items_text=items_text,
@@ -3438,6 +3439,11 @@ def vendor_portal(vendor_id):
                 st.warning(f"🤝 **Ronde Nego ke-{current_round}** — PIC meminta Anda mengirimkan Final Quotation. Harga di bawah adalah penawaran pertama Anda sebagai referensi, silakan update ke harga terbaik.")
 
             st.divider()
+
+            alamat_kirim = lookup_warehouse_address(group["location"])
+            st.markdown("##### 📍 Alamat Pengiriman / Gudang:")
+            st.info(alamat_kirim.replace("\n", "  \n"))
+
             st.markdown("##### ✏️ Masukkan Harga & Detail Penawaran:")
             attachments = get_pr_attachments(active_rfq_id)
             if attachments:
