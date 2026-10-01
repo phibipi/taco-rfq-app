@@ -1623,7 +1623,10 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
     """
             with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
                 def _call(model_name):
-                    model = genai.GenerativeModel(model_name)
+                    model = genai.GenerativeModel(
+                        model_name,
+                        generation_config=genai.GenerationConfig(temperature=0.3, max_output_tokens=1500),
+                    )
                     return model.generate_content(prompt)
 
                 res, err = call_gemini_with_fallback(_call)
