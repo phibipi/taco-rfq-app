@@ -46,6 +46,32 @@ def clean(s):
 
 
 # =====================================================================
+# GEMINI MODEL FALLBACK HELPER
+# Google kadang "pensiunkan" nama model lama (contoh: gemini-2.5-flash
+# sempat dibilang "no longer available to new users"). Daripada app
+# error total, kita coba beberapa nama model berurutan sampai ada yang
+# jalan -- jadi kalau Google ganti nama model lagi di masa depan, cukup
+# update list ini di satu tempat.
+# =====================================================================
+GEMINI_MODEL_CANDIDATES = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest"]
+
+
+def call_gemini_with_fallback(build_and_call_fn, candidates=None):
+    """build_and_call_fn(model_name) -> response. Coba tiap nama model di `candidates`
+    berurutan, return (response, None) pada yang pertama berhasil, atau (None, error_str)
+    kalau semua gagal."""
+    candidates = candidates or GEMINI_MODEL_CANDIDATES
+    last_err = None
+    for name in candidates:
+        try:
+            return build_and_call_fn(name), None
+        except Exception as e:
+            last_err = e
+            continue
+    return None, str(last_err)
+
+
+# =====================================================================
 # AUTH
 # =====================================================================
 def login(email, password):
@@ -292,6 +318,7 @@ def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items
     except Exception as e:
         st.warning(f"⚠️ Notifikasi email gagal terkirim ke {vendor_email_str}: {e}")
         return False
+
 def send_custom_email(recipients_str, subject, body_text, pdf_attachments=None):
     """
     Kirim email kustom (Awarding / Thank You) dengan atau tanpa lampiran file (.docx / .pdf).
@@ -462,7 +489,7 @@ def reset_checkbox_selection(df=None):
 # PUBLISH RFQ
 # =====================================================================
 def publish_rfq(rfq_title, pr_code, location, priority, admin_id, items_df, vendor_ids,
-                delivery_type, pic_notes, deadline, files):
+                delivery_type, pic_notes, deadline, files, shipment_mode="Langsung (Sekaligus)"):
     rfq_title = clean(rfq_title)
     pr_id = get_or_create_pr(pr_code, location, priority, admin_id)
 
@@ -496,6 +523,7 @@ def publish_rfq(rfq_title, pr_code, location, priority, admin_id, items_df, vend
                     "item_id": item_id,
                     "vendor_id": v_id,
                     "delivery_type": delivery_type,
+                    "shipment_mode": shipment_mode,
                     "pic_notes": pic_notes,
                     "line_note": clean(row.get("CATATAN_BARIS_ATAU_LINK_GAMBAR", "-")) or "-",
                     "deadline": str(deadline),
@@ -614,7 +642,7 @@ def update_vendor_top(vendor_id, top_days):
 def get_history_data():
     res = (
         sb.table("rfq_assignments")
-        .select("status, deadline, delivery_type, created_at, pr_items(description, description2, quantity, uom, purchase_requests(pr_code, location)), profiles(vendor_name, email)")
+        .select("status, deadline, delivery_type, shipment_mode, created_at, pr_items(description, description2, quantity, uom, purchase_requests(pr_code, location, rfq_title)), profiles(vendor_name, email)")
         .execute()
     )
     rows = []
@@ -624,16 +652,19 @@ def get_history_data():
         vendor = r.get("profiles") or {}
         rows.append(
             {
-                "pr_code": pr.get("pr_code"),
-                "location": pr.get("location"),
-                "description": item.get("description"),
-                "qty": item.get("quantity"),
-                "uom": item.get("uom"),
-                "vendor": vendor.get("vendor_name"),
-                "vendor_email": vendor.get("email"),
-                "status": r.get("status"),
-                "deadline": r.get("deadline"),
-                "created_at": r.get("created_at"),
+                "Judul RFQ": pr.get("rfq_title") or pr.get("pr_code"),
+                "PR Code": pr.get("pr_code"),
+                "Lokasi": pr.get("location"),
+                "Barang": clean_description(item.get("description")),
+                "Qty": item.get("quantity"),
+                "UOM": item.get("uom"),
+                "Vendor": vendor.get("vendor_name"),
+                "Email Vendor": vendor.get("email"),
+                "Metode Pengiriman": r.get("delivery_type"),
+                "Jenis Pengiriman": r.get("shipment_mode") or "-",
+                "Status": r.get("status"),
+                "Deadline": r.get("deadline"),
+                "Tanggal Dibuat": r.get("created_at"),
             }
         )
     return pd.DataFrame(rows)
@@ -716,7 +747,7 @@ def get_vendor_documents(pr_id, vendor_id=None):
     return res.data
 
 
-def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-", round_num=1, vendor_ref_no=None):
+def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-", round_num=1, vendor_ref_no=None, validity_period=None):
     try:
         # Cek apakah sudah ada quote di ROUND yang sama untuk assignment ini
         existing = (
@@ -739,6 +770,8 @@ def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, re
         }
         if vendor_ref_no is not None:
             payload["vendor_ref_no"] = clean(vendor_ref_no) or "-"
+        if validity_period is not None:
+            payload["validity_period"] = clean(validity_period) or "-"
 
         if existing.data:
             quote_id = existing.data[0]["id"]
@@ -1009,10 +1042,12 @@ def save_split_allocation(item_id, allocations):
 def render_multivendor_split_workspace(pr_id, pivot_items, df_m, vendor_list_sorted, split_toggle_map):
     st.markdown("---")
     
-    # Checkbox Utama: Hanya munculkan fitur jika PIC sengaja mencentang
+    # Checkbox Utama: Hanya munculkan fitur jika PIC sengaja mencentang.
+    # Default-nya SELALU mati (False) biar gak nongol otomatis tiap buka RFQ,
+    # walaupun sebelumnya ada item yang pernah di-split di RFQ ini.
     enable_split_feature = st.checkbox(
         "🔀 Aktifkan Fitur Multi-Vendor Split Qty (Pembagian Order per Item)",
-        value=any(split_toggle_map.values()),
+        value=False,
         key=f"main_split_toggle_{pr_id}"
     )
 
@@ -1232,16 +1267,10 @@ def generate_letter_pdf(template_path, context, output_filename="Letter.pdf"):
 
 
 # =====================================================================
-# 📜 AWARDING & THANK YOU LETTER + AUTOMATIC EMAIL BLAST
+# 📜 AWARDING & THANK YOU LETTER + AUTOMATIC EMAIL BLAST (dengan
+# konfirmasi "Apakah Anda yakin?" sebelum benar-benar close & archive)
 # =====================================================================
-def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name):
-    st.markdown("##### 📜 Awarding & Final Close RFQ")
-    st.caption(
-        "Klik tombol di bawah untuk menyelesaikan RFQ ini. Sistem akan **otomatis mengirimkan email Awarding** "
-        "ke vendor pemenang (dilengkapi lampiran PDF Surat Penunjukan) dan **email Thank You** ke vendor lainnya."
-    )
-
-    # 1. Identifikasi Pemenang & Barang
+def _identify_winners_and_losers(pivot_items, df_m, split_toggle_map, split_allocation_map, recommended_vendor_per_item):
     winner_items = {}
     for _, r in pivot_items.iterrows():
         item_id = r["item_id"]
@@ -1266,11 +1295,107 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
                 "barang": barang, "qty": r["Qty"], "uom": r["UOM"],
                 "unit_price": row_val["price"], "total": row_val["total"],
             })
-
     all_vendor_names = sorted(df_m["vendor"].unique().tolist())
     losing_vendors = [v for v in all_vendor_names if v not in winner_items]
+    return winner_items, losing_vendors
+
+
+def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, vendor_id_to_name, pivot_items):
+    """Eksekusi final: kirim email Awarding + Thank You (dgn PDF), update status
+    assignment jadi Submitted, dan ARSIPKAN RFQ (hilang dari Price Comparison,
+    tetap muncul di History)."""
     rfq_title = pr_info.get("rfq_title") or pr_info["pr_code"]
     tanggal_now = datetime.now().strftime("%d %B %Y")
+    name_to_id = {v: k for k, v in vendor_id_to_name.items()}
+
+    # A. Kirim ke Vendor Pemenang (dengan Attachment PDF)
+    for v_name, items in winner_items.items():
+        v_id = name_to_id.get(v_name)
+        v_rows = df_m[df_m["vendor"] == v_name]
+        vendor_ref_no = v_rows["vendor_ref_no"].iloc[0] if not v_rows.empty else "-"
+
+        v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
+        v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
+
+        if v_email:
+            total_amount = sum(it["total"] for it in items)
+            items_text = "\n".join(
+                f"- {it['barang']} ({it['qty']} {it['uom']}) @ Rp {it['unit_price']:,.0f} = Rp {it['total']:,.0f}".replace(",", ".")
+                for it in items
+            )
+            context = {
+                "rfq_title": rfq_title,
+                "tanggal_rfq": tanggal_now,
+                "vendor_name": v_name,
+                "rfq_num": vendor_ref_no or "-",
+                "awarding_items_text": items_text,
+                "total_amount": f"{total_amount:,.0f}".replace(",", "."),
+            }
+            pdf_bytes, err_pdf = generate_letter_pdf("template/template_awarding.docx", context)
+            email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
+                vendor_name=v_name, rfq_title=rfq_title,
+                awarding_items_text=items_text,
+                total_amount=f"{total_amount:,.0f}".replace(",", ".")
+            )
+            file_ext = "pdf" if (pdf_bytes and not err_pdf) else "docx"
+            attachments = [(f"Awarding_Letter_{v_name}.{file_ext}", pdf_bytes)] if pdf_bytes else None
+            send_custom_email(v_email, f"🎉 AWARDING LETTER - RFQ: {rfq_title}", email_body, attachments)
+
+    # B. Kirim Email Thank You ke Vendor Lain
+    for v_name in losing_vendors:
+        v_id = name_to_id.get(v_name)
+        v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
+        v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
+
+        if v_email:
+            context = {"rfq_title": rfq_title, "tanggal_rfq": tanggal_now, "vendor_name": v_name}
+            pdf_thanks_bytes, _ = generate_letter_pdf("template/template_thanks.docx", context)
+            email_body = DEFAULT_THANKYOU_EMAIL_TEMPLATE.format(vendor_name=v_name, rfq_title=rfq_title)
+            attachments = [(f"Thank_You_Letter_{v_name}.pdf", pdf_thanks_bytes)] if pdf_thanks_bytes else None
+            send_custom_email(v_email, f"Hasil Evaluasi RFQ: {rfq_title}", email_body, attachments)
+
+    # C. Update status assignment -> Submitted (otomatis masuk History)
+    items_res = sb.table("pr_items").select("id").eq("pr_id", pr_info["id"]).execute()
+    item_ids = [i["id"] for i in items_res.data] if items_res.data else []
+    if item_ids:
+        sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
+
+    # D. ARSIPKAN RFQ -> hilang dari daftar Price Comparison
+    try:
+        sb.table("purchase_requests").update({"is_archived": True}).eq("id", pr_info["id"]).execute()
+    except Exception as e:
+        st.warning(f"⚠️ RFQ sudah ditutup & email terkirim, tapi gagal menandai arsip: {e}")
+
+
+@st.dialog("Konfirmasi Tutup & Arsip RFQ")
+def _confirm_close_rfq_dialog(pr_info, winner_items, losing_vendors, df_m, vendor_id_to_name, pivot_items):
+    st.write(
+        f"Apakah Anda ingin menutup dan mengarsipkan RFQ **{pr_info.get('rfq_title') or pr_info['pr_code']}** ini? "
+        "Email Awarding (ke vendor pemenang) dan Thank You (ke vendor lain) akan langsung dikirim, "
+        "dan RFQ ini akan hilang dari daftar Price Comparison (tetap bisa dilihat di History RFQ)."
+    )
+    c1, c2 = st.columns(2)
+    if c1.button("✅ Ya, Tutup & Archive", type="primary", use_container_width=True):
+        with st.spinner("Membuat PDF Surat Penunjukan & Mengirimkan Email ke Semua Vendor..."):
+            _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, vendor_id_to_name, pivot_items)
+        st.session_state["active_compare_pr_id"] = None
+        st.toast("RFQ Berhasil Di-close dan Diarsipkan!", icon="🎉")
+        st.rerun()
+    if c2.button("❌ Batal", use_container_width=True):
+        st.rerun()
+
+
+def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name):
+    st.markdown("##### 📜 Awarding & Final Close RFQ")
+    st.caption(
+        "Klik tombol di bawah untuk menyelesaikan RFQ ini. Sistem akan meminta konfirmasi dulu, "
+        "lalu **otomatis mengirimkan email Awarding** ke vendor pemenang (dilengkapi lampiran PDF Surat Penunjukan) "
+        "dan **email Thank You** ke vendor lainnya, serta mengarsipkan RFQ ini dari daftar Price Comparison."
+    )
+
+    winner_items, losing_vendors = _identify_winners_and_losers(
+        pivot_items, df_m, split_toggle_map, split_allocation_map, recommended_vendor_per_item
+    )
 
     c_w, c_l = st.columns(2)
     with c_w:
@@ -1285,79 +1410,8 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
 
     st.write(" ")
 
-    # 2. Tombol Blast Email + PDF
     if st.button("🚀 Close RFQ & Auto-Send Email Notification + PDF", type="primary", use_container_width=True):
-        with st.spinner("Membuat PDF Surat Penunjukan & Mengirimkan Email ke Semua Vendor..."):
-            name_to_id = {v: k for k, v in vendor_id_to_name.items()}
-
-            # A. Kirim ke Vendor Pemenang (dengan Attachment PDF)
-            for v_name, items in winner_items.items():
-                v_id = name_to_id.get(v_name)
-                v_rows = df_m[df_m["vendor"] == v_name]
-                vendor_ref_no = v_rows["vendor_ref_no"].iloc[0] if not v_rows.empty else "-"
-                
-                v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
-                v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
-
-                if v_email:
-                    total_amount = sum(it["total"] for it in items)
-                    items_text = "\n".join(
-                        f"- {it['barang']} ({it['qty']} {it['uom']}) @ Rp {it['unit_price']:,.0f} = Rp {it['total']:,.0f}".replace(",", ".")
-                        for it in items
-                    )
-                    
-                    context = {
-                        "rfq_title": rfq_title, 
-                        "tanggal_rfq": tanggal_now,
-                        "vendor_name": v_name, 
-                        "rfq_num": vendor_ref_no or "-",
-                        "awarding_items_text": items_text, 
-                        "total_amount": f"{total_amount:,.0f}".replace(",", "."),
-                    }
-                    
-                    # Generate PDF dari template Word
-                    pdf_bytes, err_pdf = generate_letter_pdf("template/template_awarding.docx", context)
-                    
-                    email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
-                        vendor_name=v_name, rfq_title=rfq_title,
-                        awarding_items_text=items_text, 
-                        total_amount=f"{total_amount:,.0f}".replace(",", ".")
-                    )
-                    
-                    file_ext = "pdf" if (pdf_bytes and not err_pdf) else "docx"
-                    attachments = [(f"Awarding_Letter_{v_name}.{file_ext}", pdf_bytes)] if pdf_bytes else None
-                    
-                    send_custom_email(v_email, f"🎉 AWARDING LETTER - RFQ: {rfq_title}", email_body, attachments)
-
-            # B. Kirim Email Thank You ke Vendor Lain (opsional tambahkan PDF Thank You jika mau)
-            for v_name in losing_vendors:
-                v_id = name_to_id.get(v_name)
-                v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
-                v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
-
-                if v_email:
-                    context = {
-                        "rfq_title": rfq_title,
-                        "tanggal_rfq": tanggal_now,
-                        "vendor_name": v_name
-                    }
-                    pdf_thanks_bytes, _ = generate_letter_pdf("template/template_thanks.docx", context)
-                    
-                    email_body = DEFAULT_THANKYOU_EMAIL_TEMPLATE.format(vendor_name=v_name, rfq_title=rfq_title)
-                    attachments = [(f"Thank_You_Letter_{v_name}.pdf", pdf_thanks_bytes)] if pdf_thanks_bytes else None
-                    
-                    send_custom_email(v_email, f"Hasil Evaluasi RFQ: {rfq_title}", email_body, attachments)
-
-            # C. Update Status di Supabase
-            items_res = sb.table("pr_items").select("id").eq("pr_id", pr_info["id"]).execute()
-            item_ids = [i["id"] for i in items_res.data] if items_res.data else []
-            if item_ids:
-                sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
-
-        st.toast("RFQ Berhasil Di-close dan Email Notifikasi PDF Terkirim!", icon="🎉")
-        st.success("✅ Seluruh email notifikasi beserta lampiran PDF resmi telah dikirim ke masing-masing vendor.")
-        st.session_state["active_compare_pr_id"] = None
-        st.rerun()
+        _confirm_close_rfq_dialog(pr_info, winner_items, losing_vendors, df_m, vendor_id_to_name, pivot_items)
 
 # =====================================================================
 # AI OCR: BACA PDF QUOTATION VENDOR (GEMINI VISION)
@@ -1392,14 +1446,15 @@ Jawab HANYA JSON array tanpa markdown:
         max_output_tokens=2048,
     )
 
-    try:
-        try:
-            model = genai.GenerativeModel("gemini-2.5-flash", generation_config=generation_config)
-            res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
-        except Exception:
-            model = genai.GenerativeModel("gemini-flash-lite-latest", generation_config=generation_config)
-            res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
+    def _call(model_name):
+        model = genai.GenerativeModel(model_name, generation_config=generation_config)
+        return model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
 
+    res, err = call_gemini_with_fallback(_call)
+    if err:
+        return None, f"Semua model Gemini gagal dipanggil: {err}"
+
+    try:
         raw = (res.text or "").strip()
         raw = re.sub(r"^```json|```$", "", raw, flags=re.MULTILINE).strip()
         parsed = json.loads(raw)
@@ -1450,15 +1505,18 @@ Format jawaban Markdown dengan heading persis seperti ini:
 ### 💰 Range Harga Wajar
 ### ⚠️ Disclaimer
 """
-    try:
+    def _call(model_name):
         try:
-            model = genai.GenerativeModel("gemini-2.5-flash", tools=[{"google_search": {}}])
+            model = genai.GenerativeModel(model_name, tools=[{"google_search": {}}])
+            return model.generate_content(prompt)
         except Exception:
-            model = genai.GenerativeModel("gemini-2.5-flash")
-        res = model.generate_content(prompt)
-        return res.text, None
-    except Exception as e:
-        return None, str(e)
+            model = genai.GenerativeModel(model_name)
+            return model.generate_content(prompt)
+
+    res, err = call_gemini_with_fallback(_call)
+    if err:
+        return None, f"Semua model Gemini gagal dipanggil: {err}"
+    return res.text, None
 
 
 # =====================================================================
@@ -1532,17 +1590,19 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
     Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
     """
             with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
-                try:
-                    model = genai.GenerativeModel("gemini-2.5-flash")
-                    res = model.generate_content(prompt)
-                    if res and res.text:
-                        st.session_state[insight_key] = res.text
-                        st.rerun(scope="fragment")
-                except Exception as e:
-                    if "429" in str(e) or "quota" in str(e).lower():
+                def _call(model_name):
+                    model = genai.GenerativeModel(model_name)
+                    return model.generate_content(prompt)
+
+                res, err = call_gemini_with_fallback(_call)
+                if res and getattr(res, "text", None):
+                    st.session_state[insight_key] = res.text
+                    st.rerun(scope="fragment")
+                elif err:
+                    if "429" in str(err) or "quota" in str(err).lower():
                         st.error("⚠️ Kuota AI harian sudah habis. Coba lagi nanti atau hubungi admin.")
                     else:
-                        st.error(f"⚠️ Gagal generate insight: {e}")
+                        st.error(f"⚠️ Gagal generate insight (semua model dicoba): {err}")
 
     # Tampilkan Hasil Analisis (kalau sudah pernah di-generate)
     if insight_key in st.session_state:
@@ -1567,16 +1627,17 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
 
         with st.chat_message("assistant"):
             with st.spinner("Mengolah jawaban..."):
-                try:
-                    context_table = df_display.to_csv(index=False)
-                    full_query = f"Data CQR:\n{context_table}\n\nPertanyaan User: {user_prompt}"
-                    model = genai.GenerativeModel("gemini-2.5-flash")
-                    response = model.generate_content(full_query)
-                    answer = response.text if response else "Maaf, AI tidak dapat merespons."
-                    st.markdown(answer)
-                    st.session_state[history_key].append({"role": "assistant", "content": answer})
-                except Exception as err:
-                    st.error(f"Gagal memproses prompt: {err}")
+                context_table = df_display.to_csv(index=False)
+                full_query = f"Data CQR:\n{context_table}\n\nPertanyaan User: {user_prompt}"
+
+                def _call(model_name):
+                    model = genai.GenerativeModel(model_name)
+                    return model.generate_content(full_query)
+
+                response, err = call_gemini_with_fallback(_call)
+                answer = response.text if (response and getattr(response, "text", None)) else f"Maaf, AI tidak dapat merespons ({err})."
+                st.markdown(answer)
+                st.session_state[history_key].append({"role": "assistant", "content": answer})
 
 
 def _strip_emoji_for_pdf(text):
@@ -1628,6 +1689,17 @@ def build_vendor_summary(df_m, vendor_list):
     summary = pd.DataFrame(rows, index=vendor_list).T.reset_index()
     summary = summary.rename(columns={"index": "Kriteria"})
     return summary
+
+
+def build_validity_summary(df_m, vendor_list):
+    """Tabel kecil: masa berlaku penawaran (validity_period) per vendor, diambil
+    dari quote mereka (satu nilai yang sama berlaku untuk seluruh item di RFQ ini)."""
+    rows = []
+    for v in vendor_list:
+        sub = df_m[df_m["vendor"] == v]
+        validity = sub["validity_period"].iloc[0] if (not sub.empty and "validity_period" in sub.columns) else "-"
+        rows.append({"Vendor": v, "Masa Berlaku Penawaran": validity or "-"})
+    return pd.DataFrame(rows)
 
 
 def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_saving, saving_pct, recommended_total, ai_insight_text, summary_df=None, split_data=None):
@@ -2071,6 +2143,11 @@ def render_import_workspace(df_display):
                     index=default_priority_index
                 )
                 delivery_type_val = st.radio("🚚 Metode Pengiriman:", ["Franco (Kirim ke lokasi)", "Loco (Pengambilan sendiri)"])
+                shipment_mode_val = st.radio(
+                    "📦 Jenis Pengiriman:",
+                    ["Langsung (Sekaligus)", "Partial (Boleh Bertahap)"],
+                    help="Partial berarti vendor boleh mengirim barang bertahap/beberapa kali sampai qty terpenuhi; Langsung berarti harus sekaligus dalam satu pengiriman.",
+                )
             with c_right:
                 pic_notes_val = st.text_area("📝 Catatan Tambahan Khusus Vendor:")
                 st.caption(
@@ -2095,6 +2172,7 @@ def render_import_workspace(df_display):
                         rfq_title_val, pr_code_main, location_main, priority_val,
                         st.session_state["user_info"]["id"], edited, vendor_ids,
                         delivery_type_val, pic_notes_val, rfq_deadline_val, attached_files or [],
+                        shipment_mode=shipment_mode_val,
                     )
 
                     items_text_email = "\n".join(
@@ -2285,6 +2363,7 @@ def render_comparison_detail(pr_info):
             "top_days": v_profile.get("top_days") or 0,
             "round": q_round,
             "vendor_ref_no": q.get("vendor_ref_no", "-"),
+            "validity_period": q.get("validity_period", "-"),
         })
 
     if not data_matrix:
@@ -2394,6 +2473,13 @@ def render_comparison_detail(pr_info):
     c_save1, c_save2 = st.columns(2)
     c_save1.metric("💰 Potensi Cost Saving", f"Rp {cost_saving:,.0f}".replace(",", "."), f"{saving_pct:.1f}% dari highest quote")
     c_save2.metric("🎯 Total Estimasi Amount", f"Rp {recommended_total:,.0f}".replace(",", "."))
+
+    # -----------------------------------------------------------------
+    # 📅 MASA BERLAKU PENAWARAN per vendor (di bawah tabel harga)
+    # -----------------------------------------------------------------
+    st.markdown("##### 📅 Masa Berlaku Penawaran per Vendor")
+    df_validity = build_validity_summary(df_m, vendor_list_sorted)
+    st.dataframe(df_validity, hide_index=True, use_container_width=True)
 
     if any_nego_happened:
         st.markdown("##### 🤝 Perbandingan First Quote vs Final (Setelah Nego)")
@@ -2554,7 +2640,7 @@ def render_comparison_detail(pr_info):
         st.caption("⚠️ Library `reportlab` belum terinstall.")
 
     # -----------------------------------------------------------------
-    # 📜 AWARDING & THANK YOU LETTER
+    # 📜 AWARDING & THANK YOU LETTER (dengan konfirmasi sebelum close/archive)
     # -----------------------------------------------------------------
     st.divider()
     render_awarding_section(
@@ -2562,43 +2648,16 @@ def render_comparison_detail(pr_info):
         pivot_items, df_m, vendor_id_to_name,
     )
 
-    if st.button("🔒 Mark as Submitted (Selesai & Arsip)", type="primary", use_container_width=True):
-        try:
-            items_res = sb.table("pr_items").select("id").eq("pr_id", active_id).execute()
-            item_ids = [i["id"] for i in items_res.data] if items_res.data else []
-
-            if item_ids:
-                sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
-
-                name_to_id = {v: k for k, v in vendor_id_to_name.items()}
-                for _, r in pivot_items.iterrows():
-                    best_v_name = recommended_vendor_per_item.get(r["Barang"])
-                    best_v_id = name_to_id.get(best_v_name)
-                    if r.get("item_id") and best_v_id:
-                        try:
-                            sb.table("pr_items").update(
-                                {"awarded_vendor_id": best_v_id}
-                            ).eq("id", r["item_id"]).execute()
-                        except Exception:
-                            pass
-
-                st.toast("RFQ Berhasil Diarsip!", icon="🔒")
-                st.success(f"🎉 RFQ '{rfq_title_active}' telah ditandai sebagai Submitted & berhasil diarsip.")
-                st.session_state["active_compare_pr_id"] = None
-                st.rerun()  # full app rerun -> balik ke halaman list
-        except Exception as e:
-            st.error(f"Gagal mengarsip RFQ: {e}")
-
 
 def proc_portal_comparison():
     current_user = st.session_state["user_info"]
     current_user_id = current_user["id"]
     current_role = current_user.get("role", "proc")
 
-    # 1. FILTER DATA PR SESUAI USER YANG LOGIN
+    # 1. FILTER DATA PR SESUAI USER YANG LOGIN (dan BUANG yang sudah diarsipkan)
     try:
         query = sb.table("purchase_requests").select(
-            "id, pr_code, location, priority_status, rfq_title, uploaded_at, uploaded_by"
+            "id, pr_code, location, priority_status, rfq_title, uploaded_at, uploaded_by, is_archived"
         )
         if current_role != "admin":
             query = query.eq("uploaded_by", current_user_id)
@@ -2606,6 +2665,7 @@ def proc_portal_comparison():
         res_pr = query.execute()
         df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
     except Exception:
+        # Fallback kalau kolom is_archived/uploaded_at belum ada di DB
         query = sb.table("purchase_requests").select(
             "id, pr_code, location, priority_status, rfq_title, uploaded_by"
         )
@@ -2616,6 +2676,12 @@ def proc_portal_comparison():
         df_pr = pd.DataFrame(res_pr.data) if res_pr.data else pd.DataFrame()
         if not df_pr.empty:
             df_pr["uploaded_at"] = None
+            df_pr["is_archived"] = False
+
+    if not df_pr.empty:
+        if "is_archived" not in df_pr.columns:
+            df_pr["is_archived"] = False
+        df_pr = df_pr[df_pr["is_archived"] != True]
 
     active_id = st.session_state.get("active_compare_pr_id")
 
@@ -2855,10 +2921,16 @@ def proc_portal_manual_input():
 
     manual_key = f"manual_{pr_id}_{sel_vendor_id}"
 
-    vendor_ref_no_val = clean(st.text_input(
+    c_ref1, c_ref2 = st.columns(2)
+    vendor_ref_no_val = clean(c_ref1.text_input(
         "🔖 Nomor SPH Vendor (Wajib)",
         key=f"vendor_ref_{manual_key}",
         help="Nomor SPH vendor. Kalau tidak ada nomor, tulis tanggal SPH-nya.",
+    ))
+    validity_period_val = clean(c_ref2.text_input(
+        "📅 Masa Berlaku Penawaran",
+        key=f"validity_{manual_key}",
+        placeholder="Contoh: 30 hari / s.d. 31 Des 2026",
     ))
 
     st.markdown("##### 📎 Upload PDF Quotation Vendor (Opsional — isi tabel otomatis)")
@@ -2960,6 +3032,7 @@ def proc_portal_manual_input():
                     r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
                     r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
                     round_num=current_round, vendor_ref_no=vendor_ref_no_val,
+                    validity_period=validity_period_val,
                 )
                 if not ok:
                     all_ok = False
@@ -2974,15 +3047,52 @@ def proc_portal_manual_input():
 
 
 # =====================================================================
-# UI: PROC - HISTORY RFQ
+# UI: PROC - HISTORY RFQ (dirapihin + ada search bar)
 # =====================================================================
 def proc_portal_history():
     st.header("🔍 History RFQ")
+
     df_hist = get_history_data()
     if df_hist.empty:
         st.info("Belum ada riwayat publikasi.")
-    else:
-        st.dataframe(df_hist, hide_index=True, use_container_width=True)
+        return
+
+    df_hist["Tanggal Dibuat"] = pd.to_datetime(df_hist["Tanggal Dibuat"], errors="coerce")
+    df_hist = df_hist.sort_values("Tanggal Dibuat", ascending=False, na_position="last")
+
+    c_search, c_status = st.columns([3, 1])
+    search_query = clean(c_search.text_input(
+        "🔍 Cari Judul RFQ / PR Code / Lokasi / Vendor / Barang...",
+        placeholder="Ketik untuk mencari...",
+    )).lower()
+    status_options = ["Semua Status"] + sorted(df_hist["Status"].dropna().unique().tolist())
+    status_filter = c_status.selectbox("Filter Status", status_options)
+
+    df_show = df_hist.copy()
+    if search_query:
+        search_cols = ["Judul RFQ", "PR Code", "Lokasi", "Barang", "Vendor", "Email Vendor"]
+        mask = pd.Series(False, index=df_show.index)
+        for col in search_cols:
+            if col in df_show.columns:
+                mask = mask | df_show[col].astype(str).str.lower().str.contains(search_query, na=False, regex=False)
+        df_show = df_show[mask]
+    if status_filter != "Semua Status":
+        df_show = df_show[df_show["Status"] == status_filter]
+
+    df_show_display = df_show.copy()
+    df_show_display["Tanggal Dibuat"] = df_show_display["Tanggal Dibuat"].dt.strftime("%d %b %Y %H:%M").fillna("-")
+
+    st.caption(f"Menampilkan {len(df_show_display)} dari {len(df_hist)} baris riwayat.")
+    st.dataframe(
+        df_show_display,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Judul RFQ": st.column_config.TextColumn("Judul RFQ", width="medium"),
+            "Barang": st.column_config.TextColumn("Barang", width="medium"),
+            "Status": st.column_config.TextColumn("Status", width="small"),
+        },
+    )
 
 
 # =====================================================================
@@ -3161,7 +3271,7 @@ def vendor_portal(vendor_id):
     v_menus = [
         ("⚙️ Data Supplier", "v_supplier"),
         ("📋 List RFQ Aktif", "v_rfq"),
-        ("🔍 History RFQ", "v_history"),
+        ("🔍 History Penawaran", "v_history"),
     ]
 
     for label, v_id in v_menus:
@@ -3257,10 +3367,16 @@ def vendor_portal(vendor_id):
             if attachments:
                 st.markdown("**📎 File Referensi Lampiran:** " + ", ".join(f"`{a['file_name']}`" for a in attachments))
 
-            vendor_ref_no_val = clean(st.text_input(
+            c_ref1, c_ref2 = st.columns(2)
+            vendor_ref_no_val = clean(c_ref1.text_input(
                 "🔖 Nomor SPH Anda (Wajib)",
                 key=f"vendor_ref_{active_rfq_id}",
                 help="Isi nomor SPH (Surat Penawaran Harga) Anda. Kalau tidak ada nomor, tulis tanggal SPH-nya.",
+            ))
+            validity_period_val = clean(c_ref2.text_input(
+                "📅 Masa Berlaku Penawaran",
+                key=f"validity_{active_rfq_id}",
+                placeholder="Contoh: 30 hari / s.d. 31 Des 2026",
             ))
 
             st.markdown("##### 📎 Upload PDF Quotation (Opsional — isi tabel otomatis)")
@@ -3401,6 +3517,7 @@ def vendor_portal(vendor_id):
                             r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
                             r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
                             round_num=current_round, vendor_ref_no=vendor_ref_no_val,
+                            validity_period=validity_period_val,
                         )
                         if not ok:
                             all_ok = False
@@ -3466,9 +3583,9 @@ def vendor_portal(vendor_id):
                 st.info("Tidak ada RFQ yang cocok dengan pencarian.")
 
     # -----------------------------------------------------------------
-    # MENU 3: HISTORY RFQ
+    # MENU 3: HISTORY PENAWARAN -- dibagi 2 tab: Menang / Kalah
     # -----------------------------------------------------------------
-    elif selected_v_page == "History RFQ":
+    elif selected_v_page == "History Penawaran":
         st.header("🔍 History Penawaran Saya")
         res_hist = (
             sb.table("quotes")
@@ -3480,7 +3597,7 @@ def vendor_portal(vendor_id):
         if not res_hist.data:
             st.info("Belum ada riwayat penawaran terkirim.")
         else:
-            rows_h = []
+            rows_menang, rows_kalah = [], []
             for q in res_hist.data:
                 ass = q.get("rfq_assignments") or {}
                 item = ass.get("pr_items") or {}
@@ -3501,7 +3618,7 @@ def vendor_portal(vendor_id):
                 else:
                     status_menang = "-"
 
-                rows_h.append({
+                row = {
                     "Judul RFQ": pr.get("rfq_title") or pr.get("pr_code"),
                     "PIC Procurement": pic_name,
                     "Deskripsi": clean_description(item.get("description")),
@@ -3514,8 +3631,25 @@ def vendor_portal(vendor_id):
                     "Round": f"Round {q.get('round') or 1}",
                     "Status": status_menang,
                     "Tanggal Submit": q.get("created_at")[:10] if q.get("created_at") else "-",
-                })
-            st.dataframe(pd.DataFrame(rows_h), hide_index=True, use_container_width=True)
+                }
+
+                if status_menang == "🏆 Menang":
+                    rows_menang.append(row)
+                else:
+                    # "Kalah" dan "Menunggu Keputusan" digabung di tab yang sama
+                    rows_kalah.append(row)
+
+            tab_menang, tab_kalah = st.tabs([f"🏆 Menang ({len(rows_menang)})", f"❌ Kalah / Belum Final ({len(rows_kalah)})"])
+            with tab_menang:
+                if rows_menang:
+                    st.dataframe(pd.DataFrame(rows_menang), hide_index=True, use_container_width=True)
+                else:
+                    st.info("Belum ada penawaran yang menang.")
+            with tab_kalah:
+                if rows_kalah:
+                    st.dataframe(pd.DataFrame(rows_kalah), hide_index=True, use_container_width=True)
+                else:
+                    st.info("Tidak ada penawaran kalah / belum final saat ini.")
 
 
 # =====================================================================
