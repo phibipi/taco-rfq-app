@@ -1320,7 +1320,25 @@ def _identify_winners_and_losers(pivot_items, df_m, split_toggle_map, split_allo
     all_vendor_names = sorted(df_m["vendor"].unique().tolist())
     losing_vendors = [v for v in all_vendor_names if v not in winner_items]
     return winner_items, losing_vendors
+@st.cache_data(ttl=600, show_spinner=False)
+def get_warehouse_addresses():
+    res = sb.table("warehouse_addresses").select("origin, alamat").execute()
+    return {clean(r["origin"]).lower(): r["alamat"] for r in (res.data or [])}
 
+
+def lookup_warehouse_address(location):
+    """Cocokkan lokasi PR ke alamat gudang. Exact match dulu, lalu yang
+    namanya paling panjang yang terkandung di lokasi. Kalau gak ketemu, balik lokasi aslinya."""
+    loc = clean(location).lower()
+    if not loc:
+        return "-"
+    addr_map = get_warehouse_addresses()
+    if loc in addr_map:
+        return addr_map[loc]
+    hits = [k for k in addr_map if k in loc]
+    if hits:
+        return addr_map[max(hits, key=len)]
+    return clean(location) or "-"
 
 def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, vendor_id_to_name, pivot_items):
     """Eksekusi final: kirim email Awarding + Thank You (dgn PDF), update status
@@ -1330,17 +1348,37 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
     tanggal_now = datetime.now().strftime("%d %B %Y")
     name_to_id = {v: k for k, v in vendor_id_to_name.items()}
 
+    # Jenis pengiriman (Langsung/Partial) dari data RFQ -- 1x query
+    try:
+        ship_res = (
+            sb.table("rfq_assignments")
+            .select("shipment_mode, pr_items!inner(pr_id)")
+            .eq("pr_items.pr_id", pr_info["id"])
+            .limit(1)
+            .execute()
+        )
+        shipment_mode = (ship_res.data[0].get("shipment_mode") if ship_res.data else None) or "-"
+    except Exception:
+        shipment_mode = "-"
+
+    pic_name = (st.session_state.get("user_info") or {}).get("vendor_name") or "-"
+    alamat_gudang = lookup_warehouse_address(pr_info.get("location"))
+
     # A. Kirim ke Vendor Pemenang (dengan Attachment PDF)
     for v_name, items in winner_items.items():
         v_id = name_to_id.get(v_name)
         v_rows = df_m[df_m["vendor"] == v_name]
         vendor_ref_no = v_rows["vendor_ref_no"].iloc[0] if not v_rows.empty else "-"
-        # BARU: masa berlaku penawaran vendor ini
         validity = (
             v_rows["validity_period"].iloc[0]
             if (not v_rows.empty and "validity_period" in v_rows.columns)
             else "-"
         )
+
+        # Lead time = yang terlama dari barang yang dimenangkan vendor ini
+        won_names = [it["barang"] for it in items]
+        lt_vals = [lt for lt in v_rows[v_rows["Barang"].isin(won_names)]["lead_time"] if lt]
+        lead_time_days = max(lt_vals) if lt_vals else "-"
 
         v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
         v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
@@ -1354,13 +1392,17 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
             context = {
                 "rfq_title": rfq_title,
                 "tanggal_rfq": tanggal_now,
+                "tanggal_spk": tanggal_now,
                 "vendor_name": v_name,
                 "rfq_num": vendor_ref_no or "-",
                 "validity": validity or "-",
+                "alamat_gudang": alamat_gudang,
+                "shipment_mode": shipment_mode,
+                "lead_time_days": lead_time_days,
                 "awarding_items_text": items_text,
                 "total_amount": f"{total_amount:,.0f}".replace(",", "."),
-            }
-            pdf_bytes, err_pdf = generate_letter_pdf("template/template_awarding.docx", context)
+                "pic": pic_name
+            }            pdf_bytes, err_pdf = generate_letter_pdf("template/template_awarding.docx", context)
             email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
                 vendor_name=v_name, rfq_title=rfq_title,
                 awarding_items_text=items_text,
