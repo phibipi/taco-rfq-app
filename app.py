@@ -53,20 +53,42 @@ def clean(s):
 # jalan -- jadi kalau Google ganti nama model lagi di masa depan, cukup
 # update list ini di satu tempat.
 # =====================================================================
-GEMINI_MODEL_CANDIDATES = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest"]
+GEMINI_MODEL_CANDIDATES = [
+    "gemini-2.5-flash-lite",       # paling cepat, taruh duluan
+    "gemini-flash-lite-latest",
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+]
 
 
-def call_gemini_with_fallback(build_and_call_fn, candidates=None):
-    """build_and_call_fn(model_name) -> response. Coba tiap nama model di `candidates`
-    berurutan, return (response, None) pada yang pertama berhasil, atau (None, error_str)
-    kalau semua gagal."""
-    candidates = candidates or GEMINI_MODEL_CANDIDATES
+@st.cache_resource
+def _gemini_model_cache():
+    """Dict persisten antar rerun: simpan nama model terakhir yang berhasil."""
+    return {}
+
+
+def call_gemini_with_fallback(build_and_call_fn, candidates=None, cache_key="default"):
+    candidates = list(candidates or GEMINI_MODEL_CANDIDATES)
+    cache = _gemini_model_cache()
+
+    # Model yang terakhir berhasil dicoba PERTAMA -> gak buang waktu di model mati
+    last_ok = cache.get(cache_key)
+    if last_ok in candidates:
+        candidates.remove(last_ok)
+        candidates.insert(0, last_ok)
+
     last_err = None
     for name in candidates:
         try:
-            return build_and_call_fn(name), None
+            res = build_and_call_fn(name)
+            cache[cache_key] = name
+            return res, None
         except Exception as e:
             last_err = e
+            msg = str(e).lower()
+            # Kuota habis: ganti model gak ngebantu, langsung stop
+            if "429" in msg or "quota" in msg:
+                break
             continue
     return None, str(last_err)
 
@@ -1313,6 +1335,12 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
         v_id = name_to_id.get(v_name)
         v_rows = df_m[df_m["vendor"] == v_name]
         vendor_ref_no = v_rows["vendor_ref_no"].iloc[0] if not v_rows.empty else "-"
+        # BARU: masa berlaku penawaran vendor ini
+        validity = (
+            v_rows["validity_period"].iloc[0]
+            if (not v_rows.empty and "validity_period" in v_rows.columns)
+            else "-"
+        )
 
         v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
         v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
@@ -1328,6 +1356,7 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
                 "tanggal_rfq": tanggal_now,
                 "vendor_name": v_name,
                 "rfq_num": vendor_ref_no or "-",
+                "validity": validity or "-",
                 "awarding_items_text": items_text,
                 "total_amount": f"{total_amount:,.0f}".replace(",", "."),
             }
@@ -1447,8 +1476,11 @@ Jawab HANYA JSON array tanpa markdown:
     )
 
     def _call(model_name):
-        model = genai.GenerativeModel(model_name, generation_config=generation_config)
-        return model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
+    model = genai.GenerativeModel(
+        model_name,
+        generation_config=genai.GenerationConfig(temperature=0.3, max_output_tokens=1500),
+    )
+    return model.generate_content(prompt)
 
     res, err = call_gemini_with_fallback(_call)
     if err:
