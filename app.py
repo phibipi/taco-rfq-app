@@ -44,6 +44,28 @@ def clean(s):
         pass
     return str(s).strip()
 
+def scroll_to_top():
+    """Paksa halaman scroll ke atas (Streamlit default-nya mempertahankan posisi scroll)."""
+    import streamlit.components.v1 as components
+    import time
+    components.html(
+        f"""
+        <script>
+        // run-id: {time.time()}
+        const doc = window.parent.document;
+        const go = () => {{
+            [doc.querySelector('[data-testid="stMain"]'),
+             doc.querySelector('section.main'),
+             doc.querySelector('.main'),
+             doc.documentElement].forEach(el => {{
+                if (el) el.scrollTo({{top: 0, behavior: 'instant'}});
+            }});
+        }};
+        go(); setTimeout(go, 150); setTimeout(go, 500);
+        </script>
+        """,
+        height=0,
+    )
 
 # =====================================================================
 # GEMINI MODEL FALLBACK HELPER
@@ -2773,18 +2795,23 @@ def proc_portal_comparison():
 
     active_id = st.session_state.get("active_compare_pr_id")
 
-    # HALAMAN DETAIL
     if active_id and not df_pr.empty and active_id in df_pr["id"].values:
         pr_info = df_pr[df_pr["id"] == active_id].iloc[0]
 
+        if st.session_state.pop("_scroll_top", False):
+            scroll_to_top()
+
         if st.button("⬅️ Kembali ke Daftar RFQ"):
             st.session_state["active_compare_pr_id"] = None
+            st.session_state["_scroll_top"] = True
             st.rerun()
 
         render_comparison_detail(pr_info)
 
     # HALAMAN LIST DAFTAR RFQ
     else:
+        if st.session_state.pop("_scroll_top", False):
+            scroll_to_top()
         st.header("📊 Monitoring & Price Comparison")
 
         if df_pr.empty:
@@ -2865,6 +2892,7 @@ def proc_portal_comparison():
                         st.write(" ")
                         if st.button("🔍 Buka Detail", key=f"open_detail_{pr_id}", type="primary", use_container_width=True):
                             st.session_state["active_compare_pr_id"] = pr_id
+                            st.session_state["_scroll_top"] = True
                             st.rerun()
 
             if search_query and shown_count == 0:
@@ -3450,6 +3478,8 @@ def vendor_portal(vendor_id):
 
         if active_rfq_id and active_rfq_id in pr_groups:
             group = pr_groups[active_rfq_id]
+            if st.session_state.pop("_scroll_top", False):
+                scroll_to_top()
 
             if st.button("⬅️ Kembali ke Daftar RFQ Aktif"):
                 st.session_state["active_vendor_rfq_id"] = None
@@ -3683,6 +3713,7 @@ def vendor_portal(vendor_id):
                         st.write(" ")
                         if st.button("🔍 Buka Detail", key=f"v_detail_{pr_id}", type="primary", use_container_width=True):
                             st.session_state["active_vendor_rfq_id"] = pr_id
+                            st.session_state["_scroll_top"] = True
                             st.rerun()
 
             if v_search and shown_count == 0:
@@ -3793,6 +3824,10 @@ def combined_admin_portal():
 
         if st.sidebar.button(label, key=f"nav_btn_{page_id}", type=btn_type, use_container_width=True):
             st.session_state["current_page"] = label
+            # Setiap pindah menu, tutup detail RFQ yang terakhir dibuka
+            # supaya Price Comparison selalu mulai dari daftar RFQ
+            st.session_state["active_compare_pr_id"] = None
+            st.session_state["_scroll_top"] = True
             st.rerun()
 
     st.sidebar.markdown("---")
