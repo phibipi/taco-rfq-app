@@ -14,7 +14,11 @@ import streamlit as st
 from supabase import create_client, Client
 import re
 from datetime import datetime, timedelta
-
+from docx.shared import Pt, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+from docx.oxml.ns import nsdecls, qn
+from docx.oxml import parse_xml, OxmlElement
 # =====================================================================
 # CONFIG
 # =====================================================================
@@ -1295,7 +1299,95 @@ import subprocess
 import tempfile
 import os
 
+def build_items_subdoc(doc, items, total_amount):
+    """Gambar tabel rincian barang SPK sebagai subdoc docxtpl.
+    items: list of dict {no, barang, qty, uom, unit_price, total} (sudah string terformat)."""
+    sd = doc.new_subdoc()
 
+    headers = ["No", "Nama Barang / Jasa", "Qty", "UOM", "Harga Satuan (Rp)", "Total (Rp)"]
+    widths = [Cm(0.9), Cm(6.0), Cm(1.4), Cm(1.5), Cm(3.0), Cm(3.1)]  # total 15.9 cm
+
+    def shade(cell, hex_fill):
+        cell._tc.get_or_add_tcPr().append(
+            parse_xml(r'<w:shd {} w:val="clear" w:color="auto" w:fill="{}"/>'.format(nsdecls("w"), hex_fill)))
+
+    def fmt(cell, text, size=9, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT):
+        cell.text = str(text)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        p = cell.paragraphs[0]
+        p.alignment = align
+        p.paragraph_format.space_before = Pt(2)
+        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.line_spacing = 1
+        run = p.runs[0] if p.runs else p.add_run()
+        run.font.name = "Calibri"
+        run.font.size = Pt(size)
+        run.font.bold = bold
+
+    table = sd.add_table(rows=1, cols=len(headers))
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.autofit = False
+    table.allow_autofit = False
+
+    # geser tabel supaya sejajar dengan teks poin list (indent 720 dxa)
+    tblPr = table._tbl.tblPr
+    tblInd = parse_xml(r'<w:tblInd {} w:w="720" w:type="dxa"/>'.format(nsdecls("w")))
+    layout = tblPr.find(qn("w:tblLayout"))
+    if layout is not None:
+        layout.addprevious(tblInd)
+    else:
+        tblPr.append(tblInd)
+
+    # header (diulang kalau tabel pindah halaman)
+    hdr = table.rows[0]
+    hdr._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
+    for i, h in enumerate(headers):
+        c = hdr.cells[i]
+        shade(c, "ED7D31")
+        fmt(c, h, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+
+    aligns = [WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.CENTER,
+              WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT, WD_ALIGN_PARAGRAPH.RIGHT]
+    for it in items:
+        row = table.add_row()
+        row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+        vals = [it["no"], it["barang"], it["qty"], it["uom"], it["unit_price"], it["total"]]
+        for i, v in enumerate(vals):
+            fmt(row.cells[i], v, align=aligns[i])
+
+    # baris TOTAL (gabung 5 kolom pertama)
+    tot = table.add_row()
+    merged = tot.cells[0].merge(tot.cells[4])
+    fmt(merged, "TOTAL", bold=True, align=WD_ALIGN_PARAGRAPH.RIGHT)
+    fmt(tot.cells[5], total_amount, bold=True, align=WD_ALIGN_PARAGRAPH.RIGHT)
+    shade(merged, "F2F2F2")
+    shade(tot.cells[5], "F2F2F2")
+
+    # lebar grid + tiap sel fixed -> teks panjang otomatis wrap
+    for gc, w in zip(table._tbl.tblGrid.findall(qn("w:gridCol")), widths):
+        gc.set(qn("w:w"), str(int(w.twips)))
+    for row in table.rows:
+        for idx, w in enumerate(widths):
+            if idx < len(row.cells):
+                row.cells[idx].width = w
+
+    sd.add_paragraph("")
+    return sd
+
+
+def _render_letter_doc(template_path, context):
+    """Bikin DocxTemplate baru, sisipkan tabel harga (subdoc) kalau ada items, lalu render."""
+    from docxtpl import DocxTemplate
+    doc = DocxTemplate(template_path)
+    ctx = dict(context)
+    if ctx.get("items"):
+        ctx["tabel_harga"] = build_items_subdoc(doc, ctx["items"], ctx.get("total_amount", ""))
+    else:
+        ctx["tabel_harga"] = ""
+    doc.render(ctx)
+    return doc
+    
 def generate_letter_pdf(template_path, context, output_filename="Letter.pdf"):
     """
     Render template DOCX pakai docxtpl, lalu convert langsung ke PDF via LibreOffice CLI.
@@ -1311,8 +1403,7 @@ def generate_letter_pdf(template_path, context, output_filename="Letter.pdf"):
 
     try:
         # 1. Render data ke file DOCX sementara
-        doc = DocxTemplate(template_path)
-        doc.render(context)
+        doc = _render_letter_doc(template_path, context)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_docx_path = os.path.join(tmpdir, "temp_render.docx")
@@ -1340,8 +1431,7 @@ def generate_letter_pdf(template_path, context, output_filename="Letter.pdf"):
     except Exception as e:
         # Fallback kalau libreoffice tidak tersedia di lokal/OS: kirim DOCX biasa
         try:
-            doc = DocxTemplate(template_path)
-            doc.render(context)
+            doc = _render_letter_doc(template_path, context)
             buf = io.BytesIO()
             doc.save(buf)
             buf.seek(0)
