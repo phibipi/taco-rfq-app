@@ -8,3 +8,4 @@ plotly>=5.18.0
 PyMuPDF
 docxtpl
 python-docx
+docxcompose
