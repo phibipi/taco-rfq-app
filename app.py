@@ -32,6 +32,10 @@ PRIO_LEAD = "Lead Time Tercepat"
 PRIO_COMBO = "Kombinasi Bobot Skor (Default)"
 PRIO_SPLIT = "Split Qty (Bagi Qty per Item)"
 
+# Aturan penandatangan SPK dari sisi TACO:
+# total SPK <= batas ini -> Manager PIC ybs, di atasnya -> Chief PIC ybs
+SPK_APPROVAL_LIMIT = 50_000_000
+
 
 @st.cache_resource
 def get_client() -> Client:
@@ -247,7 +251,7 @@ def send_pic_welcome_email(pic_name, pic_email, password):
         return False
 
 
-def register_user(name, email_input, password, role, vendor_code="-"):
+def register_user(name, email_input, password, role, vendor_code="-", manager_name="", chief_name="", manager_title="", chief_title=""):
     try:
         name = clean(name)
         vendor_code = clean(vendor_code) or "-"
@@ -277,6 +281,11 @@ def register_user(name, email_input, password, role, vendor_code="-"):
         }
         if role == "vendor":
             profile_payload["credentials_sent"] = False
+        if role == "proc":
+            profile_payload["manager_name"] = clean(manager_name) or None
+            profile_payload["chief_name"] = clean(chief_name) or None
+            profile_payload["manager_title"] = clean(manager_title) or None
+            profile_payload["chief_title"] = clean(chief_title) or None
 
         sb.table("profiles").insert(profile_payload).execute()
 
@@ -295,13 +304,17 @@ def bulk_register_users(df, role):
         name = clean(row.get("name", ""))
         email = clean(row.get("email", "")).lower()
         v_code = clean(row.get("code", row.get("vendor_code", "-")))
+        mgr = clean(row.get("manager", row.get("manager_name", "")))
+        chf = clean(row.get("chief", row.get("chief_name", "")))
+        mgr_t = clean(row.get("manager_title", row.get("jabatan_manager", "")))
+        chf_t = clean(row.get("chief_title", row.get("jabatan_chief", "")))
 
         if not name or not email or "@" not in email:
             results.append({"name": name, "code": v_code, "email": email, "password": "-", "status": "❌ Data tidak valid"})
             continue
 
         password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-        ok, err = register_user(name, email, password, role, vendor_code=v_code)
+        ok, err = register_user(name, email, password, role, vendor_code=v_code, manager_name=mgr, chief_name=chf, manager_title=mgr_t, chief_title=chf_t)
         if ok:
             results.append({"name": name, "code": v_code, "email": email, "password": password, "status": "✅ Berhasil"})
         else:
@@ -1531,6 +1544,31 @@ def save_spk_approved(pr_id, vendor_id, file):
         return False, str(e)
 
 
+def get_pic_profile(pr_info):
+    """Profil PIC pemilik RFQ (uploaded_by). Kalau gak ada, pakai user yang sedang login."""
+    uid = (pr_info or {}).get("uploaded_by") or (st.session_state.get("user_info") or {}).get("id")
+    if not uid:
+        return {}
+    try:
+        return sb.table("profiles").select("vendor_name, manager_name, chief_name, manager_title, chief_title").eq("id", uid).single().execute().data or {}
+    except Exception:
+        return {}
+
+
+def resolve_spk_signer(total_amount, pic_profile):
+    """Tentukan penandatangan SPK dari sisi TACO.
+    total <= SPK_APPROVAL_LIMIT -> Manager PIC; lebih dari itu -> Chief PIC.
+    Return (nama, jabatan lengkap, mis. "Procurement Chemical Manager"; default "Manager"/"Chief" kalau belum diisi). Nama '-' kalau datanya belum diisi admin."""
+    p = pic_profile or {}
+    try:
+        total = round(float(total_amount or 0))
+    except Exception:
+        total = 0
+    if total <= SPK_APPROVAL_LIMIT:
+        return (clean(p.get("manager_name")) or "-", clean(p.get("manager_title")) or "Manager")
+    return (clean(p.get("chief_name")) or "-", clean(p.get("chief_title")) or "Chief")
+
+
 def build_spk_context(pr_info, v_name, vendor_id, items, df_m):
     """Susun semua isian template SPK untuk 1 vendor pemenang."""
     tanggal_now = datetime.now().strftime("%d %B %Y")
@@ -1565,6 +1603,13 @@ def build_spk_context(pr_info, v_name, vendor_id, items, df_m):
             v_data = {}
 
     total_amount = sum(it["total"] for it in items)
+    pic_profile = get_pic_profile(pr_info)
+    signer_name, signer_title = resolve_spk_signer(total_amount, pic_profile)
+    if signer_name == "-":
+        st.warning(
+            f"⚠️ {signer_title} untuk PIC pemilik RFQ ini belum diisi (SPK {v_name}). "
+            f"Minta admin isi di menu ➕ Daftarkan PIC → tab Atur Manager & Chief."
+        )
     items_text = "\n".join(
         f"- {it['barang']} ({it['qty']} {it['uom']}) @ Rp {it['unit_price']:,.0f} = Rp {it['total']:,.0f}".replace(",", ".")
         for it in items
@@ -1605,9 +1650,13 @@ def build_spk_context(pr_info, v_name, vendor_id, items, df_m):
         "items": items_table,
         "total_amount": f"{total_amount:,.0f}".replace(",", "."),
         "tax": str(tax_type).lower() if tax_type and tax_type != "-" else "-",
-        "pic": (st.session_state.get("user_info") or {}).get("vendor_name") or "-",
-        "direktur": v_data.get("pic_name") or "-",
-        "jabatan": v_data.get("pic_jabatan") or "-",
+        "pic": pic_profile.get("vendor_name") or (st.session_state.get("user_info") or {}).get("vendor_name") or "-",
+        # --- kolom tanda tangan di template_awarding.docx ---
+        "managerchief": signer_name,      # {{ managerchief }}  nama penandatangan TACO
+        "jabatan_taco": signer_title,     # {{ jabatan_taco }}  jabatan lengkap penandatangan TACO
+        "pic_v": v_data.get("pic_name") or "-",   # {{ pic_v }}  nama PIC vendor
+        "direktur": v_data.get("pic_name") or "-",  # alias lama
+        "jabatan": v_data.get("pic_jabatan") or "-",  # {{ jabatan }} jabatan PIC vendor
     }
     return context, v_data.get("email")
 
@@ -1774,11 +1823,15 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
     # ④ Close
     st.markdown("**④ Close RFQ & Kirim Email**")
     c_w, c_l = st.columns(2)
+    pic_profile_awd = get_pic_profile(pr_info)
     with c_w:
         st.write("**🏆 Vendor Pemenang (Email + SPK approved):**")
         for v_name, items in winner_items.items():
             tot = sum(it["total"] for it in items)
-            st.caption(f"• **{v_name}** — Total: Rp {tot:,.0f}".replace(",", "."))
+            sg_name, sg_title = resolve_spk_signer(tot, pic_profile_awd)
+            st.caption(
+                f"• **{v_name}** — Total: Rp {tot:,.0f} → TTD TACO: {sg_title} ({sg_name})".replace(",", ".")
+            )
     with c_l:
         st.write("**🙏 Vendor Lain (Email Thank You Letter):**")
         for v_name in losing_vendors:
@@ -1903,6 +1956,96 @@ Format jawaban Markdown dengan heading persis seperti ini:
 # (Dipanggil dari dalam fragment render_comparison_detail, jadi st.rerun()
 #  di sini di-scope="fragment" biar gak nge-rerun seluruh app.)
 # =====================================================================
+AI_FAB_CSS = """
+<style>
+/* marker-nya disembunyiin, tombol popover tepat sesudahnya dijadiin floating button */
+.element-container:has(.taco-ai-fab-marker),
+div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) { display: none; }
+
+.element-container:has(.taco-ai-fab-marker) + .element-container,
+div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) + div[data-testid="stElementContainer"] {
+    position: fixed !important;
+    right: 28px;
+    bottom: 28px;
+    width: auto !important;
+    z-index: 999990;
+}
+div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) + div[data-testid="stElementContainer"] button,
+.element-container:has(.taco-ai-fab-marker) + .element-container button {
+    border-radius: 999px;
+    padding: 0.65rem 1.2rem;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #ED7D31, #d9480f);
+    border: none;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) + div[data-testid="stElementContainer"] button:hover,
+.element-container:has(.taco-ai-fab-marker) + .element-container button:hover {
+    filter: brightness(1.08);
+    color: #fff;
+}
+/* panel chat yang kebuka */
+div[data-testid="stPopoverBody"]:has(.taco-ai-body-marker) {
+    width: min(460px, 92vw) !important;
+    max-height: 78vh;
+    overflow-y: auto;
+}
+</style>
+"""
+
+AI_CHAT_SYSTEM = (
+    "Kamu asisten Procurement & Cost Analyst TACO Group. Jawab SINGKAT, to the point, "
+    "dalam Bahasa Indonesia, berbasis angka dari data CQR yang diberikan. "
+    "Kalau data tidak cukup, bilang apa adanya, jangan mengarang."
+)
+
+
+def _gemini_stream(prompt, system_instruction=None, temperature=0.3, max_tokens=1500, cache_key="stream"):
+    """Panggil Gemini mode STREAMING supaya teks langsung muncul kata demi kata
+    (jauh terasa lebih cepat daripada nunggu jawaban utuh).
+    Chunk pertama diambil di dalam fallback, jadi kalau model mati/kuota habis
+    tetap otomatis coba model berikutnya. Return (generator_teks, error)."""
+    import google.generativeai as genai
+    from itertools import chain
+
+    def _call(model_name):
+        kwargs = {"generation_config": genai.GenerationConfig(temperature=temperature, max_output_tokens=max_tokens)}
+        if system_instruction:
+            kwargs["system_instruction"] = system_instruction
+        model = genai.GenerativeModel(model_name, **kwargs)
+        it = iter(model.generate_content(prompt, stream=True))
+        first = next(it)  # error / model mati / kosong ketahuan di sini -> fallback jalan
+        return first, it
+
+    res, err = call_gemini_with_fallback(_call, cache_key=cache_key)
+    if err or not res:
+        return None, err or "Respons kosong"
+    first, it = res
+
+    def _gen():
+        for chunk in chain([first], it):
+            try:
+                t = chunk.text
+            except ValueError:  # chunk tanpa teks (mis. finish/safety)
+                t = ""
+            if t:
+                yield t
+
+    return _gen(), None
+
+
+def _ai_error_text(err):
+    if "429" in str(err) or "quota" in str(err).lower():
+        return "⚠️ Kuota AI harian sudah habis. Coba lagi nanti atau hubungi admin."
+    return f"⚠️ AI gagal merespons: {err}"
+
+
+# =====================================================================
+# AI ASSISTANT (floating button kanan bawah -> popup: Generate Insight / Tanya AI)
+# Nama fungsi dipertahankan (render_ai_insight) supaya pemanggilnya gak perlu diubah.
+# Hasil insight tetap disimpan di st.session_state["ai_insight_<rfq>"] -> otomatis masuk PDF CQR.
+# =====================================================================
 def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, saving_pct=None, recommended_total=None):
     if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
         st.caption("💡 Fitur AI belum aktif — tambahkan `gemini.api_key` di secrets.")
@@ -1914,15 +2057,10 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
         st.caption("⚠️ Library `google-generativeai` belum terinstall.")
         return
 
-    api_key = st.secrets["gemini"]["api_key"].strip()
-    genai.configure(api_key=api_key)
-
-    st.markdown("---")
-    st.markdown("### 🤖 AI Procurement Insight")
+    genai.configure(api_key=st.secrets["gemini"]["api_key"].strip())
 
     insight_key = f"ai_insight_{rfq_title}"
     history_key = f"ai_history_{rfq_title}"
-
     if history_key not in st.session_state:
         st.session_state[history_key] = []
 
@@ -1933,93 +2071,112 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
         if cost_saving is not None else "Data cost saving tidak tersedia."
     )
 
-    # 1. GENERATE HANYA KALAU USER KLIK TOMBOL
-    if insight_key not in st.session_state:
-        st.info("💡 Analisis AI belum dibuat untuk RFQ ini. Klik tombol di bawah untuk generate.")
-        if st.button("🤖 Generate AI Insight", key=f"gen_{rfq_title}", type="primary", use_container_width=True):
-            context_table = df_display.to_csv(index=False)
+    # marker + CSS: tombol popover tepat setelah marker dijadikan floating button
+    st.markdown(AI_FAB_CSS + '<span class="taco-ai-fab-marker"></span>', unsafe_allow_html=True)
 
-            prompt = f"""Kamu adalah Procurement Specialist & Cost Analyst untuk TACO Group.
-    Analisis data perbandingan penawaran vendor berikut untuk RFQ: {rfq_title}
+    with st.popover("🤖 Asisten AI"):
+        st.markdown('<span class="taco-ai-body-marker"></span>**🤖 Asisten AI Procurement**', unsafe_allow_html=True)
+        st.caption(f"RFQ: {rfq_title}")
+        tab_ins, tab_chat = st.tabs(["✨ Generate Insight", "💬 Tanya AI"])
 
-    DATA PERBANDINGAN (kolom "🏆 Rekomendasi" = vendor terbaik per item berdasarkan bobot yang dipilih PIC):
-    {context_table}
+        # ---------------- TAB 1: GENERATE INSIGHT (prompt otomatis) ----------------
+        with tab_ins:
+            has_insight = insight_key in st.session_state
+            if has_insight:
+                clicked = st.button("🔄 Regenerate Analisis", key=f"regen_{rfq_title}", use_container_width=True)
+            else:
+                st.caption("Analisis otomatis: cost saving & trade-off, evaluasi bobot, merk alternatif, catatan penting, action plan.")
+                clicked = st.button("✨ Generate AI Insight", key=f"gen_{rfq_title}", type="primary", use_container_width=True)
 
-    BOBOT PRIORITAS YANG DIPAKAI PIC SAAT INI: {weights_text}
-    {saving_text}
-
-    Tugasmu adalah memberikan analisis otomatis tanpa perlu ditanya.
-    SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADING & BULLET POINT KONSISTEN):
-
-    ### 💰 Analisis Cost Saving & Trade-off:
-    (Jelaskan angka cost saving di atas dengan bahasa manusia — worth it atau tidak. Untuk item-item di mana vendor rekomendasi BUKAN yang termurah, jelaskan trade-off-nya: kenapa vendor itu tetap direkomendasikan meski bukan termurah — misal karena TOP lebih panjang, stock ready, atau lead time lebih cepat. Sebutkan pro & cons konkret per item kalau ada perbedaan berarti.)
-
-    ### ⚖️ Evaluasi Bobot Prioritas:
-    (Komentari apakah bobot yang dipilih PIC saat ini {weights_text} sudah pas untuk RFQ ini. Kalau ada indikasi bobot ini kurang optimal — misal barang urgent tapi bobot lead time kecil, atau nilai RFQ besar tapi bobot harga kecil — sarankan penyesuaian bobot yang lebih masuk akal beserta alasannya.)
-
-    ### 💡 Rekomendasi Merk Alternative:
-    (Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya, atau rekomendasi vendor sesuai lokasi)
-
-    ### ⚠️ Catatan Penting untuk Procurement:
-    (Sorot jika ada vendor yang harganya terindikasi jauh diatas harga pasar/overpriced/typo kuantitas, atau lead time terlalu lama)
-
-    ### 🎯 Rekomendasi Action Plan PIC:
-    (Berikan langkah konkret 1, 2, 3 untuk PIC Procurement, misal: klarifikasi typo, negosiasi target harga, atau minta RFQ ulang merk alternatif. pertimbangkan juga jika barang tersebut dicatat urgent, maka pilih alternatif yang paling sesuai)
-
-    Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
-    """
-            with st.spinner("⚡ AI sedang menganalisis penawaran vendor..."):
-                def _call(model_name):
-                    model = genai.GenerativeModel(
-                        model_name,
-                        generation_config=genai.GenerationConfig(temperature=0.3, max_output_tokens=1500),
-                    )
-                    return model.generate_content(prompt)
-
-                res, err = call_gemini_with_fallback(_call)
-                if res and getattr(res, "text", None):
-                    st.session_state[insight_key] = res.text
-                    st.rerun(scope="fragment")
-                elif err:
-                    if "429" in str(err) or "quota" in str(err).lower():
-                        st.error("⚠️ Kuota AI harian sudah habis. Coba lagi nanti atau hubungi admin.")
-                    else:
-                        st.error(f"⚠️ Gagal generate insight (semua model dicoba): {err}")
-
-    # Tampilkan Hasil Analisis (kalau sudah pernah di-generate)
-    if insight_key in st.session_state:
-        with st.container(border=True):
-            st.markdown(st.session_state[insight_key])
-        if st.button("🔄 Regenerate Analisis", key=f"regen_{rfq_title}"):
-            del st.session_state[insight_key]
-            st.rerun(scope="fragment")
-
-    # 2. PROMPT BAR CHAT MANUAL (USER BISA NANYA TAMBAHAN)
-    st.markdown("##### 💬 Tanya AI seputar penawaran ini:")
-
-    for msg in st.session_state[history_key]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    user_prompt = st.chat_input("Contoh: 'Berapa total potensi hemat jika saya pilih Vendor A?'")
-    if user_prompt:
-        st.session_state[history_key].append({"role": "user", "content": user_prompt})
-        with st.chat_message("user"):
-            st.markdown(user_prompt)
-
-        with st.chat_message("assistant"):
-            with st.spinner("Mengolah jawaban..."):
+            if clicked:
                 context_table = df_display.to_csv(index=False)
-                full_query = f"Data CQR:\n{context_table}\n\nPertanyaan User: {user_prompt}"
+                prompt = f"""Kamu adalah Procurement Specialist & Cost Analyst untuk TACO Group.
+Analisis data perbandingan penawaran vendor berikut untuk RFQ: {rfq_title}
 
-                def _call(model_name):
-                    model = genai.GenerativeModel(model_name)
-                    return model.generate_content(full_query)
+DATA PERBANDINGAN (kolom "🏆 Rekomendasi" = vendor terbaik per item berdasarkan bobot yang dipilih PIC):
+{context_table}
 
-                response, err = call_gemini_with_fallback(_call)
-                answer = response.text if (response and getattr(response, "text", None)) else f"Maaf, AI tidak dapat merespons ({err})."
-                st.markdown(answer)
-                st.session_state[history_key].append({"role": "assistant", "content": answer})
+BOBOT PRIORITAS YANG DIPAKAI PIC SAAT INI: {weights_text}
+{saving_text}
+
+Tugasmu adalah memberikan analisis otomatis tanpa perlu ditanya.
+SUSUN HASIL ANALISIS DENGAN FORMAT MARKDOWN SEPERTI BERIKUT (WAJIB GUNAKAN HEADING & BULLET POINT KONSISTEN):
+
+### 💰 Analisis Cost Saving & Trade-off:
+(Jelaskan angka cost saving di atas dengan bahasa manusia — worth it atau tidak. Untuk item-item di mana vendor rekomendasi BUKAN yang termurah, jelaskan trade-off-nya: kenapa vendor itu tetap direkomendasikan meski bukan termurah — misal karena TOP lebih panjang, stock ready, atau lead time lebih cepat. Sebutkan pro & cons konkret per item kalau ada perbedaan berarti.)
+
+### ⚖️ Evaluasi Bobot Prioritas:
+(Komentari apakah bobot yang dipilih PIC saat ini {weights_text} sudah pas untuk RFQ ini. Kalau ada indikasi bobot ini kurang optimal — misal barang urgent tapi bobot lead time kecil, atau nilai RFQ besar tapi bobot harga kecil — sarankan penyesuaian bobot yang lebih masuk akal beserta alasannya.)
+
+### 💡 Rekomendasi Merk Alternative:
+(Berikan 2-3 opsi merk pengganti yang setara/lebih baik jika relevan dengan item dan spesifikasi di atas, cantumkan estimasi harga pasar & keunggulannya, atau rekomendasi vendor sesuai lokasi)
+
+### ⚠️ Catatan Penting untuk Procurement:
+(Sorot jika ada vendor yang harganya terindikasi jauh diatas harga pasar/overpriced/typo kuantitas, atau lead time terlalu lama)
+
+### 🎯 Rekomendasi Action Plan PIC:
+(Berikan langkah konkret 1, 2, 3 untuk PIC Procurement, misal: klarifikasi typo, negosiasi target harga, atau minta RFQ ulang merk alternatif. pertimbangkan juga jika barang tersebut dicatat urgent, maka pilih alternatif yang paling sesuai)
+
+Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta actionable dalam Bahasa Indonesia.
+"""
+                stream, err = _gemini_stream(prompt, temperature=0.3, max_tokens=1500, cache_key="insight")
+                if stream is None:
+                    st.error(_ai_error_text(err))
+                else:
+                    with st.container(height=380, border=True):
+                        try:
+                            st.session_state[insight_key] = st.write_stream(stream)
+                        except Exception as e:
+                            st.error(_ai_error_text(e))
+            elif has_insight:
+                with st.container(height=380, border=True):
+                    st.markdown(st.session_state[insight_key])
+
+        # ---------------- TAB 2: TANYA AI (chat bebas) ----------------
+        with tab_chat:
+            history = st.session_state[history_key]
+            chat_box = st.container(height=330, border=True)
+            with chat_box:
+                if not history:
+                    st.caption("Contoh: “Berapa total hemat kalau saya pilih Vendor A semua?”")
+                for msg in history:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+
+            with st.form(f"ai_chat_form_{rfq_title}", clear_on_submit=True):
+                q = st.text_input("Pertanyaan", placeholder="Tanya apa saja soal penawaran ini…", label_visibility="collapsed")
+                sent = st.form_submit_button("Kirim ➤", use_container_width=True)
+
+            if sent and clean(q):
+                q = clean(q)
+                past = "\n".join(
+                    f"{'User' if m['role'] == 'user' else 'AI'}: {m['content']}" for m in history[-6:]
+                )
+                full_query = (
+                    f"Data CQR untuk RFQ {rfq_title}:\n{df_display.to_csv(index=False)}\n\n"
+                    f"Bobot prioritas PIC: {weights_text}\n{saving_text}\n\n"
+                    + (f"Percakapan sebelumnya:\n{past}\n\n" if past else "")
+                    + f"Pertanyaan User: {q}"
+                )
+                history.append({"role": "user", "content": q})
+                with chat_box:
+                    with st.chat_message("user"):
+                        st.markdown(q)
+                    with st.chat_message("assistant"):
+                        stream, err = _gemini_stream(
+                            full_query, system_instruction=AI_CHAT_SYSTEM,
+                            temperature=0.3, max_tokens=800, cache_key="chat",
+                        )
+                        if stream is None:
+                            answer = _ai_error_text(err)
+                            st.markdown(answer)
+                        else:
+                            try:
+                                answer = st.write_stream(stream)
+                            except Exception as e:
+                                answer = _ai_error_text(e)
+                                st.markdown(answer)
+                history.append({"role": "assistant", "content": answer})
 
 
 def _strip_emoji_for_pdf(text):
@@ -3553,11 +3710,15 @@ def proc_portal_history():
 # =====================================================================
 def admin_portal_register_pic():
     st.header("➕ Daftarkan PIC Procurement")
-    sub1, sub2 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)"])
+    sub1, sub2, sub3 = st.tabs(["Satu-satu", "Bulk (Excel/CSV)", "Atur Manager & Chief"])
     with sub1:
         with st.form("form_register_pic", clear_on_submit=True):
             p_name = clean(st.text_input("Nama PIC"))
             p_email = clean(st.text_input("Email PIC")).lower()
+            p_manager = clean(st.text_input("Nama Manager PIC (TTD SPK ≤ Rp 50 jt)"))
+            p_manager_t = clean(st.text_input("Jabatan Manager (mis. Procurement Chemical Manager)"))
+            p_chief = clean(st.text_input("Nama Chief PIC (TTD SPK > Rp 50 jt)"))
+            p_chief_t = clean(st.text_input("Jabatan Chief (mis. Procurement Chief)"))
             pw_mode = st.radio("Password:", ["Generate otomatis (random)", "Ketik manual"], key="pic_pw_mode")
             p_password_manual = (
                 clean(st.text_input("Password (min. 6 karakter):", type="password", key="pic_pw_manual"))
@@ -3574,7 +3735,7 @@ def admin_portal_register_pic():
                         p_password_manual if pw_mode == "Ketik manual"
                         else "".join(random.choices(string.ascii_letters + string.digits, k=10))
                     )
-                    ok, err = register_user(p_name, p_email, final_password, "proc")
+                    ok, err = register_user(p_name, p_email, final_password, "proc", manager_name=p_manager, chief_name=p_chief, manager_title=p_manager_t, chief_title=p_chief_t)
                     if ok:
                         st.session_state["last_pic_single_result"] = {
                             "ok": True, "name": p_name, "email": p_email, "password": final_password,
@@ -3591,7 +3752,7 @@ def admin_portal_register_pic():
                 st.error(result["msg"])
 
     with sub2:
-        st.write("Upload file Excel/CSV dengan 2 kolom: **name** dan **email**.")
+        st.write("Upload file Excel/CSV dengan kolom: **name**, **email**, **manager**, **manager_title**, **chief**, **chief_title** (boleh dikosongkan, bisa diisi nanti di tab *Atur Manager & Chief*).")
         bulk_file = st.file_uploader("Upload file", type=["xlsx", "csv"], key="bulk_pic")
         if bulk_file is not None:
             df_bulk = pd.read_csv(bulk_file) if bulk_file.name.endswith(".csv") else pd.read_excel(bulk_file)
@@ -3608,6 +3769,33 @@ def admin_portal_register_pic():
                 use_container_width=True,
                 hide_index=True,
             )
+
+    with sub3:
+        st.caption("Aturan TTD SPK: total ≤ Rp 50.000.000 → Manager PIC, di atas itu → Chief PIC.")
+        df_pic = get_users_by_role("proc")
+        if df_pic.empty:
+            st.info("Belum ada PIC terdaftar.")
+        else:
+            for col in ("manager_name", "chief_name", "manager_title", "chief_title"):
+                if col not in df_pic.columns:
+                    df_pic[col] = None
+            pic_opts = {f"{r['vendor_name']} ({r['email']})": r for _, r in df_pic.iterrows()}
+            sel = st.selectbox("Pilih PIC", list(pic_opts.keys()), key="sel_pic_approver")
+            row = pic_opts[sel]
+            with st.form(f"form_pic_approver_{row['id']}"):
+                new_mgr = clean(st.text_input("Nama Manager", value=clean(row.get("manager_name"))))
+                new_mgr_t = clean(st.text_input("Jabatan Manager", value=clean(row.get("manager_title"))))
+                new_chf = clean(st.text_input("Nama Chief", value=clean(row.get("chief_name"))))
+                new_chf_t = clean(st.text_input("Jabatan Chief", value=clean(row.get("chief_title"))))
+                if st.form_submit_button("💾 Simpan", type="primary"):
+                    try:
+                        sb.table("profiles").update(
+                            {"manager_name": new_mgr or None, "chief_name": new_chf or None,
+                         "manager_title": new_mgr_t or None, "chief_title": new_chf_t or None}
+                        ).eq("id", row["id"]).execute()
+                        st.success("✅ Tersimpan.")
+                    except Exception as e:
+                        st.error(f"Gagal menyimpan (sudah jalanin SQL tambah kolom?): {e}")
 
 
 def admin_portal_register_vendor():
@@ -3669,7 +3857,7 @@ def admin_portal_user_list():
         st.markdown("**PIC Procurement**")
         df_proc = get_users_by_role("proc")
         st.dataframe(
-            df_proc[["email", "vendor_name", "created_at"]] if not df_proc.empty else pd.DataFrame(),
+            df_proc.reindex(columns=["email", "vendor_name", "manager_name", "manager_title", "chief_name", "chief_title", "created_at"]) if not df_proc.empty else pd.DataFrame(),
             hide_index=True, use_container_width=True,
         )
     with c2:
