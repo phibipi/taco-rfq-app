@@ -281,13 +281,11 @@ def register_user(name, email_input, password, role, vendor_code="-", manager_na
         }
         if role == "vendor":
             profile_payload["credentials_sent"] = False
-        if role == "proc":
-            profile_payload["manager_name"] = clean(manager_name) or None
-            profile_payload["chief_name"] = clean(chief_name) or None
-            profile_payload["manager_title"] = clean(manager_title) or None
-            profile_payload["chief_title"] = clean(chief_title) or None
 
         sb.table("profiles").insert(profile_payload).execute()
+
+        if role == "proc" and any(clean(x) for x in (manager_name, chief_name, manager_title, chief_title)):
+            save_pic_approvers(uid, manager_name, manager_title, chief_name, chief_title)
 
         if role == "proc":
             send_pic_welcome_email(name, primary_email, password)
@@ -1544,6 +1542,33 @@ def save_spk_approved(pr_id, vendor_id, file):
         return False, str(e)
 
 
+APPROVER_COLS = ["manager_name", "manager_title", "chief_name", "chief_title"]
+
+
+def get_pic_approvers_map():
+    """{pic_id: {manager_name, manager_title, chief_name, chief_title}} dari tabel pic_approvers."""
+    try:
+        res = sb.table("pic_approvers").select("*").execute()
+        return {r["pic_id"]: r for r in (res.data or [])}
+    except Exception:
+        return {}
+
+
+def save_pic_approvers(pic_id, manager_name, manager_title, chief_name, chief_title):
+    """Simpan/ubah data Manager & Chief untuk 1 PIC. Return (ok, error)."""
+    try:
+        sb.table("pic_approvers").upsert({
+            "pic_id": str(pic_id),
+            "manager_name": clean(manager_name) or None,
+            "manager_title": clean(manager_title) or None,
+            "chief_name": clean(chief_name) or None,
+            "chief_title": clean(chief_title) or None,
+        }).execute()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 def get_pic_profile(pr_info):
     """Profil PIC pemilik RFQ (uploaded_by). Kalau gak ada, pakai user yang sedang login."""
     uid = None
@@ -1558,9 +1583,15 @@ def get_pic_profile(pr_info):
     if not uid:
         return {}
     try:
-        return sb.table("profiles").select("vendor_name, manager_name, chief_name, manager_title, chief_title").eq("id", uid).single().execute().data or {}
+        prof = sb.table("profiles").select("vendor_name").eq("id", uid).single().execute().data or {}
     except Exception:
-        return {}
+        prof = {}
+    try:
+        appr = sb.table("pic_approvers").select("*").eq("pic_id", str(uid)).execute().data
+        appr = appr[0] if appr else {}
+    except Exception:
+        appr = {}
+    return {**prof, **{k: appr.get(k) for k in APPROVER_COLS}}
 
 
 def resolve_spk_signer(total_amount, pic_profile):
@@ -1970,14 +2001,16 @@ AI_FAB_CSS = """
 .element-container:has(.taco-ai-fab-marker),
 div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) { display: none; }
 
+.st-key-taco_ai_fab,
 .element-container:has(.taco-ai-fab-marker) + .element-container,
 div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) + div[data-testid="stElementContainer"] {
     position: fixed !important;
-    right: 28px;
-    bottom: 28px;
+    right: 24px;
+    bottom: 90px;
     width: auto !important;
     z-index: 999990;
 }
+.st-key-taco_ai_fab button,
 div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) + div[data-testid="stElementContainer"] button,
 .element-container:has(.taco-ai-fab-marker) + .element-container button {
     border-radius: 999px;
@@ -1989,6 +2022,7 @@ div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) + div[data-testid
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
 }
 div[data-testid="stElementContainer"]:has(.taco-ai-fab-marker) + div[data-testid="stElementContainer"] button:hover,
+.st-key-taco_ai_fab button:hover,
 .element-container:has(.taco-ai-fab-marker) + .element-container button:hover {
     filter: brightness(1.08);
     color: #fff;
@@ -2082,7 +2116,11 @@ def render_ai_insight(df_display, rfq_title, weights=None, cost_saving=None, sav
     # marker + CSS: tombol popover tepat setelah marker dijadikan floating button
     st.markdown(AI_FAB_CSS + '<span class="taco-ai-fab-marker"></span>', unsafe_allow_html=True)
 
-    with st.popover("🤖 Asisten AI"):
+    try:
+        _pop = st.popover("🤖 Asisten AI", key="taco_ai_fab")
+    except TypeError:  # Streamlit lama: popover belum punya parameter key
+        _pop = st.popover("🤖 Asisten AI")
+    with _pop:
         st.markdown('<span class="taco-ai-body-marker"></span>**🤖 Asisten AI Procurement**', unsafe_allow_html=True)
         st.caption(f"RFQ: {rfq_title}")
         tab_ins, tab_chat = st.tabs(["✨ Generate Insight", "💬 Tanya AI"])
@@ -3784,9 +3822,9 @@ def admin_portal_register_pic():
         if df_pic.empty:
             st.info("Belum ada PIC terdaftar.")
         else:
-            for col in ("manager_name", "chief_name", "manager_title", "chief_title"):
-                if col not in df_pic.columns:
-                    df_pic[col] = None
+            appr_map = get_pic_approvers_map()
+            for col in APPROVER_COLS:
+                df_pic[col] = df_pic["id"].map(lambda i, c=col: (appr_map.get(i) or {}).get(c))
             pic_opts = {f"{r['vendor_name']} ({r['email']})": r for _, r in df_pic.iterrows()}
             sel = st.selectbox("Pilih PIC", list(pic_opts.keys()), key="sel_pic_approver")
             row = pic_opts[sel]
@@ -3796,14 +3834,11 @@ def admin_portal_register_pic():
                 new_chf = clean(st.text_input("Nama Chief", value=clean(row.get("chief_name"))))
                 new_chf_t = clean(st.text_input("Jabatan Chief", value=clean(row.get("chief_title"))))
                 if st.form_submit_button("💾 Simpan", type="primary"):
-                    try:
-                        sb.table("profiles").update(
-                            {"manager_name": new_mgr or None, "chief_name": new_chf or None,
-                         "manager_title": new_mgr_t or None, "chief_title": new_chf_t or None}
-                        ).eq("id", row["id"]).execute()
+                    ok, err = save_pic_approvers(row["id"], new_mgr, new_mgr_t, new_chf, new_chf_t)
+                    if ok:
                         st.success("✅ Tersimpan.")
-                    except Exception as e:
-                        st.error(f"Gagal menyimpan (sudah jalanin SQL tambah kolom?): {e}")
+                    else:
+                        st.error(f"Gagal menyimpan (sudah jalanin SQL bikin tabel pic_approvers?): {err}")
 
 
 def admin_portal_register_vendor():
@@ -3864,6 +3899,10 @@ def admin_portal_user_list():
     with c1:
         st.markdown("**PIC Procurement**")
         df_proc = get_users_by_role("proc")
+        if not df_proc.empty:
+            _am = get_pic_approvers_map()
+            for col in APPROVER_COLS:
+                df_proc[col] = df_proc["id"].map(lambda i, c=col: (_am.get(i) or {}).get(c))
         st.dataframe(
             df_proc.reindex(columns=["email", "vendor_name", "manager_name", "manager_title", "chief_name", "chief_title", "created_at"]) if not df_proc.empty else pd.DataFrame(),
             hide_index=True, use_container_width=True,
