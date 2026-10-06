@@ -1630,16 +1630,7 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
     )
     name_to_id = {v: k for k, v in vendor_id_to_name.items()}
 
-    c_w, c_l = st.columns(2)
-    with c_w:
-        st.write("**🏆 Vendor Pemenang (Email + SPK approved):**")
-        for v_name, items in winner_items.items():
-            tot = sum(it["total"] for it in items)
-            st.caption(f"• **{v_name}** — Total: Rp {tot:,.0f}".replace(",", "."))
-    with c_l:
-        st.write("**🙏 Vendor Lain (Email Thank You Letter):**")
-        for v_name in losing_vendors:
-            st.caption(f"• **{v_name}**")
+
 
     # ① Download CQR
     st.markdown("**① Download CQR**")
@@ -1692,6 +1683,16 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
 
     # ④ Close
     st.markdown("**④ Close RFQ & Kirim Email**")
+    c_w, c_l = st.columns(2)
+    with c_w:
+        st.write("**🏆 Vendor Pemenang (Email + SPK approved):**")
+        for v_name, items in winner_items.items():
+            tot = sum(it["total"] for it in items)
+            st.caption(f"• **{v_name}** — Total: Rp {tot:,.0f}".replace(",", "."))
+    with c_l:
+        st.write("**🙏 Vendor Lain (Email Thank You Letter):**")
+        for v_name in losing_vendors:
+            st.caption(f"• **{v_name}**")
     all_uploaded = bool(winner_items) and all(spk_status.values())
     if not all_uploaded:
         st.caption("🔒 Tombol aktif setelah SPK approved semua vendor pemenang terupload.")
