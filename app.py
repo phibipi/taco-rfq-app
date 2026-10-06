@@ -1798,7 +1798,7 @@ def _confirm_close_rfq_dialog(pr_info, winner_items, losing_vendors, df_m, vendo
         st.rerun()
 
 
-def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name, cqr_pdf_bytes=None):
+def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name, cqr_pdf_bytes=None, ai_included=False):
     pr_id = pr_info["id"]
     st.markdown("##### 📜 Awarding & Final Close RFQ")
     st.caption("Alur: **① Download CQR → ② Download SPK → ③ Upload SPK approved → ④ Close RFQ & kirim email.**")
@@ -1813,6 +1813,10 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
     # ① Download CQR
     st.markdown("**① Download CQR**")
     if cqr_pdf_bytes:
+        if ai_included:
+            st.caption("✅ AI Insight ikut tercetak di PDF CQR.")
+        else:
+            st.caption("ℹ️ AI Insight belum di-generate — klik 🤖 Asisten AI → Generate Insight dulu kalau mau ikut masuk PDF.")
         st.download_button(
             "📄 Download CQR (PDF)", cqr_pdf_bytes, f"CQR_{pr_info.get('rfq_title') or pr_info['pr_code']}.pdf",
             mime="application/pdf", key=f"dl_cqr_{pr_id}", use_container_width=True,
@@ -2289,7 +2293,7 @@ def build_validity_summary(df_m, vendor_list):
     return pd.DataFrame(rows)
 
 
-def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_saving, saving_pct, recommended_total, ai_insight_text, summary_df=None, split_data=None, highlight_map=None, grand_total_vendors=None):
+def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_saving, saving_pct, recommended_total, ai_insight_text, summary_df=None, split_data=None, highlight_map=None, grand_total_vendors=None, df_m=None, split_mode=False, split_alloc=None):
     try:
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib import colors
@@ -2306,7 +2310,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     )
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("TitleCustom", parent=styles["Title"], fontSize=16, spaceAfter=4)
-    h2_style = ParagraphStyle("H2Custom", parent=styles["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor("#1f2937"))
+    h2_style = ParagraphStyle("H2Custom", parent=styles["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor("#1f2937"), keepWithNext=1)
     normal_style = ParagraphStyle("NormalCustom", parent=styles["Normal"], fontSize=9, leading=12)
     bullet_style = ParagraphStyle("BulletCustom", parent=normal_style, leftIndent=12)
     ai_head_style = ParagraphStyle("AIHead", parent=normal_style, fontSize=10, fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=2)
@@ -2331,116 +2335,202 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     ))
     elements.append(Spacer(1, 10))
 
-    elements.append(Paragraph("Tabel Perbandingan", h2_style))
-    raw_rows = [list(display_df.columns)] + [[str(v) for v in row] for row in display_df.values]
-    wrapped_data = []
-    for ri, row in enumerate(raw_rows):
-        style = header_cell_style if ri == 0 else body_cell_style
-        wrapped_data.append([Paragraph(_strip_emoji_for_pdf(val), style) for val in row])
+    from xml.sax.saxutils import escape as _esc
 
-    n_cols = len(display_df.columns)
+    def _P(val, style):
+        return Paragraph(_esc(_strip_emoji_for_pdf(val)), style)
+
     avail_width = landscape(A4)[0] - 24 * mm
-    barang_width = avail_width * 0.22
-    other_width = (avail_width - barang_width) / max(n_cols - 1, 1)
-    col_widths = [barang_width] + [other_width] * (n_cols - 1)
-
-    tbl = Table(wrapped_data, colWidths=col_widths, repeatRows=1)
-    last_row_idx = len(wrapped_data) - 1
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-        ("BACKGROUND", (0, last_row_idx), (-1, last_row_idx), colors.HexColor("#e2e8f0")),
-    ]))
-
-    # Highlight hijau vendor terpilih (sama seperti tabel CQR di halaman)
+    dark = colors.HexColor("#1f2937")
+    grid = colors.HexColor("#cbd5e1")
     green = colors.HexColor("#d1fae5")
-    cols = list(display_df.columns)
-    barang_idx = cols.index("Barang")
-    hl_cmds = []
-    for ri, row in enumerate(display_df.values, start=1):
-        vendors_hl = (highlight_map or {}).get(str(row[barang_idx]), [])
-        if not vendors_hl:
-            continue
-        for v in vendors_hl:
-            for cn in (f"{v} — Price/Unit", f"{v} — Total"):
-                if cn in cols:
-                    ci = cols.index(cn)
-                    hl_cmds.append(("BACKGROUND", (ci, ri), (ci, ri), green))
-        if "🏆 Rekomendasi" in cols:
-            ci = cols.index("🏆 Rekomendasi")
-            hl_cmds.append(("BACKGROUND", (ci, ri), (ci, ri), green))
-    for v in (grand_total_vendors or []):
-        cn = f"{v} — Total"
-        if cn in cols:
-            ci = cols.index(cn)
-            hl_cmds.append(("BACKGROUND", (ci, last_row_idx), (ci, last_row_idx), green))
-    if hl_cmds:
-        tbl.setStyle(TableStyle(hl_cmds))
 
+    # ------------------------------------------------------------------
+    # TABEL PERBANDINGAN: per vendor = [Brand/Stock/Lead Time | Price/Unit | Total]
+    # (brand, ready stock, lead time sifatnya beda tiap item -> ikut di tabel item)
+    # ------------------------------------------------------------------
+    elements.append(Paragraph("Tabel Perbandingan", h2_style))
+    cols = list(display_df.columns)
+    vendors = [c[: -len(" — Price/Unit")] for c in cols if c.endswith(" — Price/Unit")]
+    rec_col = "🏆 Rekomendasi"
+
+    info_lookup = {}
+    if df_m is not None and not df_m.empty:
+        for _, mr in df_m.iterrows():
+            info_lookup[(mr["Barang"], mr["vendor"])] = mr
+
+    def _info_cell(barang, vendor):
+        mr = info_lookup.get((barang, vendor))
+        if mr is None:
+            return "-"
+        brand = str(mr.get("brand") or "-").strip() or "-"
+        stock = str(mr.get("ready_stock") or "").strip()
+        stock_txt = "Ready" if stock == "Ya" else ("Tidak ready" if stock == "Tidak" else "-")
+        lt = mr.get("lead_time")
+        lt_txt = f"{lt} hari" if lt not in (None, "", 0) and str(lt) != "nan" else "-"
+        return f"Brand: {brand}\nStock: {stock_txt}\nLead time: {lt_txt}"
+
+    def _info_para(text):
+        return Paragraph("<br/>".join(_esc(_strip_emoji_for_pdf(t)) for t in text.split("\n")), body_cell_style)
+
+    n_v = len(vendors)
+    head0 = [_P("Barang", header_cell_style), _P("Qty", header_cell_style), _P("UOM", header_cell_style)]
+    head1 = ["", "", ""]
+    for v in vendors:
+        head0 += [_P(v, header_cell_style), "", ""]
+        head1 += [_P("Brand / Stock / Lead Time", header_cell_style), _P("Harga", header_cell_style), _P("Total", header_cell_style)]
+    head0.append(_P("Rekomendasi", header_cell_style))
+    head1.append("")
+
+    data = [head0, head1]
+    n_items = len(display_df) - 1  # baris terakhir = GRAND TOTAL
+    for ri, (_, row) in enumerate(display_df.iterrows()):
+        is_total = ri == n_items
+        barang = str(row["Barang"])
+        line = [_P(barang, body_cell_style), _P(row.get("Qty", ""), body_cell_style), _P(row.get("UOM", ""), body_cell_style)]
+        for v in vendors:
+            line.append(_P("", body_cell_style) if is_total else _info_para(_info_cell(barang, v)))
+            line.append(_P(row.get(f"{v} — Price/Unit", ""), body_cell_style))
+            line.append(_P(row.get(f"{v} — Total", ""), body_cell_style))
+        line.append(_P(row.get(rec_col, ""), body_cell_style))
+        data.append(line)
+
+    fixed = {"barang": 0.17, "qty": 0.04, "uom": 0.04, "rec": 0.11}
+    per_vendor = (1 - sum(fixed.values())) / max(n_v, 1)
+    widths = [avail_width * fixed["barang"], avail_width * fixed["qty"], avail_width * fixed["uom"]]
+    for _ in vendors:
+        widths += [avail_width * per_vendor * 0.38, avail_width * per_vendor * 0.29, avail_width * per_vendor * 0.33]
+    widths.append(avail_width * fixed["rec"])
+
+    tbl = Table(data, colWidths=widths, repeatRows=2)
+    last_idx = len(data) - 1
+    cmds = [
+        ("BACKGROUND", (0, 0), (-1, 1), dark),
+        ("GRID", (0, 0), (-1, -1), 0.5, grid),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 2), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("BACKGROUND", (0, last_idx), (-1, last_idx), colors.HexColor("#e2e8f0")),
+        ("SPAN", (0, 0), (0, 1)), ("SPAN", (1, 0), (1, 1)), ("SPAN", (2, 0), (2, 1)),
+        ("SPAN", (3 + 3 * n_v, 0), (3 + 3 * n_v, 1)),
+    ]
+    for vi in range(n_v):
+        c0 = 3 + 3 * vi
+        cmds.append(("SPAN", (c0, 0), (c0 + 2, 0)))
+        cmds.append(("ALIGN", (c0, 0), (c0 + 2, 0), "CENTER"))
+    # highlight hijau vendor terpilih
+    for ri in range(n_items):
+        barang = str(display_df.iloc[ri]["Barang"])
+        for v in (highlight_map or {}).get(barang, []):
+            if v in vendors:
+                c0 = 3 + 3 * vendors.index(v)
+                cmds.append(("BACKGROUND", (c0, ri + 2), (c0 + 2, ri + 2), green))
+        if (highlight_map or {}).get(barang):
+            cmds.append(("BACKGROUND", (3 + 3 * n_v, ri + 2), (3 + 3 * n_v, ri + 2), green))
+    for v in (grand_total_vendors or []):
+        if v in vendors:
+            c0 = 3 + 3 * vendors.index(v)
+            cmds.append(("BACKGROUND", (c0 + 2, last_idx), (c0 + 2, last_idx), green))
+    tbl.setStyle(TableStyle(cmds))
     elements.append(tbl)
     elements.append(Spacer(1, 14))
 
+    # ------------------------------------------------------------------
+    # Ringkasan per vendor (tanpa Brand / Ready Stock / Lead Time -> sudah di tabel item)
+    # ------------------------------------------------------------------
     if summary_df is not None and not summary_df.empty:
-        elements.append(Paragraph("Ringkasan Spesifikasi per Vendor", h2_style))
-        sum_rows = [list(summary_df.columns)] + [[str(v) for v in row] for row in summary_df.values]
-        sum_wrapped = []
-        for ri, row in enumerate(sum_rows):
-            style = header_cell_style if ri == 0 else body_cell_style
-            sum_wrapped.append([Paragraph(_strip_emoji_for_pdf(val), style) for val in row])
-        sum_n_cols = len(summary_df.columns)
-        sum_col_widths = [avail_width / sum_n_cols] * sum_n_cols
-        sum_tbl = Table(sum_wrapped, colWidths=sum_col_widths, repeatRows=1)
-        sum_tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-        ]))
-        elements.append(sum_tbl)
-        elements.append(Spacer(1, 14))
-
-    if split_data:
-        elements.append(Paragraph("Alokasi PO — Item per Vendor Pemenang", h2_style))
-        for v_name, items in split_data.items():
-            df_split = pd.DataFrame(items)
-            subtotal = df_split["Total"].sum()
-            elements.append(Paragraph(f"<b>{v_name}</b> — Subtotal: Rp {subtotal:,.0f}".replace(",", "."), normal_style))
-            split_cols = ["Barang", "Qty", "UOM", "Brand", "Unit Price", "Total"]
-            split_rows = [split_cols] + [
-                [str(row["Barang"]), str(row["Qty"]), str(row["UOM"]), str(row["Brand"]),
-                 f"Rp {row['Unit Price']:,.0f}".replace(",", "."), f"Rp {row['Total']:,.0f}".replace(",", ".")]
-                for row in items
-            ]
-            split_wrapped = []
-            for ri, row in enumerate(split_rows):
+        summary_pdf = summary_df[~summary_df["Kriteria"].isin(["Brand", "Ready Stock", "Lead Time (Hari)"])]
+        if not summary_pdf.empty:
+            elements.append(Paragraph("Ringkasan per Vendor", h2_style))
+            sum_rows = [list(summary_pdf.columns)] + [[str(v) for v in row] for row in summary_pdf.values]
+            sum_wrapped = []
+            for ri, row in enumerate(sum_rows):
                 style = header_cell_style if ri == 0 else body_cell_style
-                split_wrapped.append([Paragraph(_strip_emoji_for_pdf(val), style) for val in row])
-            sp_col_widths = [avail_width * 0.30] + [avail_width * 0.70 / 5] * 5
-            sp_tbl = Table(split_wrapped, colWidths=sp_col_widths, repeatRows=1)
-            sp_tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                sum_wrapped.append([_P(val, style) for val in row])
+            sum_n_cols = len(summary_pdf.columns)
+            sum_tbl = Table(sum_wrapped, colWidths=[avail_width / sum_n_cols] * sum_n_cols, repeatRows=1)
+            sum_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), dark),
+                ("GRID", (0, 0), (-1, -1), 0.5, grid),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
             ]))
-            elements.append(sp_tbl)
+            elements.append(sum_tbl)
+            elements.append(Spacer(1, 14))
+
+    # ------------------------------------------------------------------
+    # Alokasi Split Qty: HANYA kalau prioritas = Split Qty
+    # ------------------------------------------------------------------
+    if split_mode and split_alloc:
+        elements.append(Paragraph("Alokasi Split Qty", h2_style))
+        sa_cols = ["Barang", "Vendor", "Alokasi (%)", "Qty", "UOM"]
+        sa_rows = [sa_cols] + [
+            [str(r["Barang"]), str(r["Vendor"]), f"{r['Persen']:g}%", f"{r['Qty']:g}", str(r["UOM"])]
+            for r in split_alloc
+        ]
+        sa_wrapped = [[_P(val, header_cell_style if ri == 0 else body_cell_style) for val in row] for ri, row in enumerate(sa_rows)]
+        sa_tbl = Table(sa_wrapped, colWidths=[avail_width * w for w in (0.34, 0.26, 0.14, 0.14, 0.12)], repeatRows=1)
+        sa_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), dark),
+            ("GRID", (0, 0), (-1, -1), 0.5, grid),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ]))
+        elements.append(sa_tbl)
+        elements.append(Spacer(1, 12))
+
+    # ------------------------------------------------------------------
+    # Rincian PO per vendor pemenang (selalu langsung per pemenang)
+    # ------------------------------------------------------------------
+    if split_data:
+        elements.append(Paragraph("Rincian PO per Vendor Pemenang", h2_style))
+        grand_po = 0
+        for v_name, items in split_data.items():
+            df_split = pd.DataFrame(items)
+            subtotal = df_split["Total"].sum()
+            grand_po += subtotal
+            elements.append(Paragraph(f"<b>{_esc(str(v_name))}</b> — Subtotal: Rp {subtotal:,.0f}".replace(",", "."), normal_style))
+            elements.append(Spacer(1, 2))
+            po_cols = ["Barang", "Qty", "UOM", "Brand", "Unit Price", "Total", "Lead Time"]
+            po_rows = [po_cols] + [
+                [str(r["Barang"]), f"{float(r['Qty']):g}", str(r["UOM"]), str(r["Brand"]),
+                 f"Rp {r['Unit Price']:,.0f}".replace(",", "."), f"Rp {r['Total']:,.0f}".replace(",", "."),
+                 f"{r.get('Lead Time (Hari)')} hari" if r.get("Lead Time (Hari)") else "-"]
+                for r in items
+            ]
+            po_wrapped = [[_P(val, header_cell_style if ri == 0 else body_cell_style) for val in row] for ri, row in enumerate(po_rows)]
+            po_tbl = Table(po_wrapped, colWidths=[avail_width * w for w in (0.30, 0.07, 0.07, 0.14, 0.14, 0.15, 0.13)], repeatRows=1)
+            po_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), dark),
+                ("GRID", (0, 0), (-1, -1), 0.5, grid),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+            ]))
+            elements.append(po_tbl)
             elements.append(Spacer(1, 10))
+        elements.append(Paragraph(f"<b>Total seluruh PO: Rp {grand_po:,.0f}</b>".replace(",", "."), normal_style))
+        elements.append(Spacer(1, 10))
 
     if ai_insight_text:
         elements.append(Paragraph("AI Procurement Insight", h2_style))
-        for line in ai_insight_text.split("\n"):
-            line = _strip_emoji_for_pdf(line)
-            if not line:
+        for raw_line in str(ai_insight_text).split("\n"):
+            line = _strip_emoji_for_pdf(raw_line)
+            if not line.strip():
                 continue
-            line_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
-            if line_html.startswith("### "):
-                elements.append(Paragraph(line_html.replace("### ", ""), ai_head_style))
-            elif line_html.startswith(("- ", "* ")):
-                elements.append(Paragraph("• " + line_html[2:], bullet_style))
+            indent_lvl = (len(raw_line) - len(raw_line.lstrip(" "))) // 2
+            line = _esc(line.strip())
+            line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+            line = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", line)
+            m_head = re.match(r"^#{2,4}\s+(.*)", line)
+            m_bul = re.match(r"^[-*•]\s+(.*)", line)
+            if m_head:
+                elements.append(Paragraph(m_head.group(1), ai_head_style))
+            elif m_bul:
+                st_b = ParagraphStyle("B", parent=bullet_style, leftIndent=12 + 12 * indent_lvl)
+                elements.append(Paragraph("• " + m_bul.group(1), st_b))
+            elif re.match(r"^\d+[.)]\s+", line):
+                elements.append(Paragraph(line, bullet_style))
             else:
-                elements.append(Paragraph(line_html, normal_style))
+                elements.append(Paragraph(line, normal_style))
 
     doc.build(elements)
     buffer.seek(0)
@@ -3169,10 +3259,15 @@ def render_comparison_detail(pr_info):
         split_allocation_map = get_split_allocation_map(split_item_ids)
 
     split_data = {}
+    split_alloc_rows = []   # khusus PDF: tabel Alokasi Split Qty (hanya dipakai di mode Split Qty)
     for _, r in pivot_items.iterrows():
         item_id = r["item_id"]
         if split_toggle_map.get(item_id) and split_allocation_map.get(item_id):
             for a in split_allocation_map[item_id]:
+                split_alloc_rows.append({
+                    "Barang": r["Barang"], "Vendor": a["vendor_name"], "Persen": float(a["percentage"]),
+                    "Qty": round(float(r["Qty"] or 0) * (a["percentage"] / 100.0), 2), "UOM": r["UOM"],
+                })
                 match = df_m[(df_m["Barang"] == r["Barang"]) & (df_m["vendor"] == a["vendor_name"])]
                 if match.empty:
                     continue
@@ -3285,6 +3380,7 @@ def render_comparison_detail(pr_info):
         display_df, cost_saving, saving_pct, recommended_total, ai_insight_text,
         summary_df=summary_df, split_data=split_data,
         highlight_map=highlight_map, grand_total_vendors=grand_total_vendors,
+        df_m=df_m, split_mode=split_mode, split_alloc=split_alloc_rows,
     )
 
     # -----------------------------------------------------------------
@@ -3294,6 +3390,7 @@ def render_comparison_detail(pr_info):
     render_awarding_section(
         pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map,
         pivot_items, df_m, vendor_id_to_name, cqr_pdf_bytes=pdf_bytes,
+        ai_included=bool(ai_insight_text),
     )
 
 
@@ -3825,6 +3922,46 @@ def admin_portal_register_pic():
             appr_map = get_pic_approvers_map()
             for col in APPROVER_COLS:
                 df_pic[col] = df_pic["id"].map(lambda i, c=col: (appr_map.get(i) or {}).get(c))
+            with st.expander("📤 Upload massal Manager & Chief (CSV/Excel) — update berdasarkan email PIC"):
+                tmpl_df = pd.DataFrame([{
+                    "email": "pic@taco.co.id",
+                    "manager_name": "Nama Manager",
+                    "manager_title": "Procurement Chemical Manager",
+                    "chief_name": "Nama Chief",
+                    "chief_title": "Procurement Chief",
+                }])
+                st.download_button(
+                    "⬇️ Download template CSV", tmpl_df.to_csv(index=False).encode("utf-8-sig"),
+                    "template_pic_approvers.csv", mime="text/csv", key="dl_tmpl_pic_appr",
+                )
+                st.caption("Kolom wajib: **email** (email PIC yang sudah terdaftar). Kolom lain boleh dikosongkan; sel kosong = nilai lama dihapus.")
+                up_appr = st.file_uploader("Upload file", type=["csv", "xlsx"], key="up_pic_appr")
+                if up_appr is not None:
+                    df_up = pd.read_csv(up_appr) if up_appr.name.lower().endswith(".csv") else pd.read_excel(up_appr)
+                    df_up.columns = [clean(c).lower() for c in df_up.columns]
+                    df_up = df_up.rename(columns={"manager": "manager_name", "chief": "chief_name",
+                                                  "jabatan_manager": "manager_title", "jabatan_chief": "chief_title"})
+                    for col in APPROVER_COLS:
+                        if col not in df_up.columns:
+                            df_up[col] = ""
+                    st.dataframe(df_up[["email"] + APPROVER_COLS], hide_index=True, use_container_width=True)
+                    if st.button("🚀 Simpan semua", type="primary", key="btn_save_pic_appr_bulk"):
+                        email_to_id = {}
+                        for _, pr_row in df_pic.iterrows():
+                            for em in str(pr_row["email"]).split(";"):
+                                if clean(em):
+                                    email_to_id[clean(em).lower()] = pr_row["id"]
+                        results = []
+                        for _, ur in df_up.iterrows():
+                            em = clean(ur.get("email")).lower()
+                            pid = email_to_id.get(em)
+                            if not pid:
+                                results.append({"email": em, "status": "❌ Email PIC tidak ditemukan"})
+                                continue
+                            ok, err = save_pic_approvers(pid, ur["manager_name"], ur["manager_title"], ur["chief_name"], ur["chief_title"])
+                            results.append({"email": em, "status": "✅ Tersimpan" if ok else f"❌ {err}"})
+                        st.dataframe(pd.DataFrame(results), hide_index=True, use_container_width=True)
+
             pic_opts = {f"{r['vendor_name']} ({r['email']})": r for _, r in df_pic.iterrows()}
             sel = st.selectbox("Pilih PIC", list(pic_opts.keys()), key="sel_pic_approver")
             row = pic_opts[sel]
