@@ -25,7 +25,6 @@ BUCKET_NAME = "rfq-attachments"
 PRIO_ITEM = "Termurah per Item"
 PRIO_TOTAL = "Total Termurah (1 PO)"
 PRIO_LEAD = "Lead Time Tercepat"
-PRIO_STOCK = "Ready Stock Utama"
 PRIO_COMBO = "Kombinasi Bobot Skor (Default)"
 PRIO_SPLIT = "Split Qty (Bagi Qty per Item)"
 
@@ -625,12 +624,12 @@ def get_price_comparison_data():
     return pd.DataFrame(rows)
 
 
-def compute_recommendation(df_item, w_price, w_top, w_stock, w_leadtime):
+def compute_recommendation(df_item, w_price, w_top, w_leadtime):
     """
     df_item: baris-baris quote untuk SATU item (dari beberapa vendor).
-    Mengembalikan df_item + kolom 'score' (0-100, makin tinggi makin direkomendasikan) + 'is_recommended'.
+    Mengembalikan df_item + kolom 'score' (0-100) + 'is_recommended'.
     Normalisasi per-item: harga makin murah makin baik, TOP makin panjang makin baik,
-    ready stock 'Ya' dapat nilai penuh, lead time makin pendek makin baik.
+    lead time makin pendek makin baik. (Ready stock TIDAK ikut skor, hanya ditampilkan di tabel.)
     """
     d = df_item.copy()
     if d.empty:
@@ -651,12 +650,9 @@ def compute_recommendation(df_item, w_price, w_top, w_stock, w_leadtime):
     price_score = norm_lower_better(d["unit_price"])
     top_score = norm_higher_better(d["top_days"])
     leadtime_score = norm_lower_better(d["lead_time_days"])
-    stock_score = d["ready_stock"].apply(lambda x: 100.0 if str(x).strip().lower() == "ya" else 0.0)
 
-    total_w = max(w_price + w_top + w_stock + w_leadtime, 1)
-    d["score"] = (
-        price_score * w_price + top_score * w_top + stock_score * w_stock + leadtime_score * w_leadtime
-    ) / total_w
+    total_w = max(w_price + w_top + w_leadtime, 1)
+    d["score"] = (price_score * w_price + top_score * w_top + leadtime_score * w_leadtime) / total_w
     d["score"] = d["score"].round(1)
     d["is_recommended"] = d["score"] == d["score"].max()
     return d
@@ -702,7 +698,20 @@ def update_vendor_profile_info(vendor_id, top_days, pic_name, pic_jabatan):
         "pic_jabatan": clean(pic_jabatan),
     }).eq("id", vendor_id).execute()
     get_vendors_cached.clear()
-
+def get_supplier_completeness(vendor_id):
+    """Return (lengkap: bool, daftar_field_kosong: list)."""
+    try:
+        p = sb.table("profiles").select("top_days, pic_name, pic_jabatan").eq("id", vendor_id).single().execute().data or {}
+    except Exception:
+        p = {}
+    missing = []
+    if p.get("top_days") is None:
+        missing.append("TOP / Term of Payment")
+    if not clean(p.get("pic_name")):
+        missing.append("Nama PIC / Penandatangan")
+    if not clean(p.get("pic_jabatan")):
+        missing.append("Jabatan")
+    return (not missing), missing
 
 def get_history_data():
     """History RFQ: HANYA RFQ yang sudah di-close (is_archived = True)."""
@@ -829,7 +838,7 @@ def get_vendor_documents(pr_id, vendor_id=None):
     return res.data
 
 
-def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-", round_num=1, vendor_ref_no=None, validity_period=None):
+def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-", round_num=1, vendor_ref_no=None, validity_period=None, tax_type=None):
     try:
         # Cek apakah sudah ada quote di ROUND yang sama untuk assignment ini
         existing = (
@@ -854,6 +863,8 @@ def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, re
             payload["vendor_ref_no"] = clean(vendor_ref_no) or "-"
         if validity_period is not None:
             payload["validity_period"] = clean(validity_period) or "-"
+        if tax_type is not None:
+            payload["tax_type"] = tax_type
 
         if existing.data:
             quote_id = existing.data[0]["id"]
@@ -1442,6 +1453,7 @@ def build_spk_context(pr_info, v_name, vendor_id, items, df_m):
     won_names = [it["barang"] for it in items]
     lt_vals = [lt for lt in v_rows[v_rows["Barang"].isin(won_names)]["lead_time"] if lt]
     lead_time_days = max(lt_vals) if lt_vals else "-"
+    tax_type = v_rows["tax_type"].iloc[0] if (not v_rows.empty and "tax_type" in v_rows.columns) else "-"
 
     try:
         ship_res = (
@@ -1467,6 +1479,27 @@ def build_spk_context(pr_info, v_name, vendor_id, items, df_m):
         f"- {it['barang']} ({it['qty']} {it['uom']}) @ Rp {it['unit_price']:,.0f} = Rp {it['total']:,.0f}".replace(",", ".")
         for it in items
     )
+    def _fmt_qty(q):
+        try:
+            q = float(q)
+            return str(int(q)) if q == int(q) else f"{q:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except Exception:
+            return str(q)
+
+    def _rp(n):
+        return f"{float(n):,.0f}".replace(",", ".")
+
+    items_table = [
+        {
+            "no": i,
+            "barang": it["barang"],
+            "qty": _fmt_qty(it["qty"]),
+            "uom": it["uom"],
+            "unit_price": _rp(it["unit_price"]),
+            "total": _rp(it["total"]),
+        }
+        for i, it in enumerate(items, start=1)
+    ]    
     context = {
         "rfq_title": pr_info.get("rfq_title") or pr_info["pr_code"],
         "pr_number": pr_info["pr_code"],
@@ -1479,7 +1512,9 @@ def build_spk_context(pr_info, v_name, vendor_id, items, df_m):
         "shipment_mode": shipment_mode,
         "lead_time_days": lead_time_days,
         "awarding_items_text": items_text,
+        "items": items_table,
         "total_amount": f"{total_amount:,.0f}".replace(",", "."),
+        "tax": str(tax_type).lower() if tax_type and tax_type != "-" else "-",
         "pic": (st.session_state.get("user_info") or {}).get("vendor_name") or "-",
         "direktur": v_data.get("pic_name") or "-",
         "jabatan": v_data.get("pic_jabatan") or "-",
@@ -1914,7 +1949,7 @@ def _strip_emoji_for_pdf(text):
 
 def build_vendor_summary(df_m, vendor_list):
     """Ringkasan per vendor: Brand, Ready Stock, Lead Time, Warranty, Payment Term (TOP)."""
-    rows = {"Brand": [], "Ready Stock": [], "Lead Time (Hari)": [], "Warranty": [], "Payment Term (TOP)": []}
+    rows = {"Brand": [], "Ready Stock": [], "Lead Time (Hari)": [], "Warranty": [], "Payment Term (TOP)": [], "Pajak (PPN)": []}
     for v in vendor_list:
         sub = df_m[df_m["vendor"] == v]
 
@@ -1941,6 +1976,8 @@ def build_vendor_summary(df_m, vendor_list):
 
         top = sub["top_days"].iloc[0] if not sub.empty else 0
         rows["Payment Term (TOP)"].append(f"{int(top)} hari" if top else "-")
+        taxes = sorted(set(str(t).strip() for t in sub["tax_type"] if str(t).strip() and str(t).strip() != "-")) if "tax_type" in sub.columns else []
+        rows["Pajak (PPN)"].append(", ".join(taxes) if taxes else "-")
 
     summary = pd.DataFrame(rows, index=vendor_list).T.reset_index()
     summary = summary.rename(columns={"index": "Kriteria"})
@@ -2526,30 +2563,29 @@ def render_comparison_detail(pr_info):
     st.markdown("##### 🎯 Prioritas Pemilihan Vendor:")
     sort_priority = st.radio(
         "Urutkan & Prioritaskan Berdasarkan:",
-        [PRIO_ITEM, PRIO_TOTAL, PRIO_LEAD, PRIO_STOCK, PRIO_COMBO, PRIO_SPLIT],
+        [PRIO_ITEM, PRIO_TOTAL, PRIO_LEAD, PRIO_COMBO, PRIO_SPLIT],
         horizontal=True,
         label_visibility="collapsed",
     )
+    # (Harga, TOP, Lead Time)
     weight_presets = {
-        PRIO_ITEM: (100, 0, 0, 0),
-        PRIO_TOTAL: (100, 0, 0, 0),
-        PRIO_LEAD: (0, 0, 0, 100),
-        PRIO_STOCK: (0, 0, 100, 0),
-        PRIO_COMBO: (40, 20, 20, 20),
-        PRIO_SPLIT: (40, 20, 20, 20),
+        PRIO_ITEM: (100, 0, 0),
+        PRIO_TOTAL: (100, 0, 0),
+        PRIO_LEAD: (0, 0, 100),
+        PRIO_COMBO: (50, 25, 25),
+        PRIO_SPLIT: (50, 25, 25),
     }
     total_mode = (sort_priority == PRIO_TOTAL)
     split_mode = (sort_priority == PRIO_SPLIT)
-    w_price, w_top, w_stock, w_leadtime = weight_presets[sort_priority]
+    w_price, w_top, w_leadtime = weight_presets[sort_priority]
 
     k_price = f"w_price_ss_{active_id}"
     k_top = f"w_top_ss_{active_id}"
-    k_stock = f"w_stock_ss_{active_id}"
     k_leadtime = f"w_leadtime_ss_{active_id}"
-    weight_keys = [k_price, k_top, k_stock, k_leadtime]
+    weight_keys = [k_price, k_top, k_leadtime]
 
     if st.session_state.get(f"last_preset_{active_id}") != sort_priority:
-        st.session_state[k_price], st.session_state[k_top], st.session_state[k_stock], st.session_state[k_leadtime] = weight_presets[sort_priority]
+        st.session_state[k_price], st.session_state[k_top], st.session_state[k_leadtime] = weight_presets[sort_priority]
         st.session_state[f"last_preset_{active_id}"] = sort_priority
 
     def _rebalance_weights(changed_key):
@@ -2574,24 +2610,22 @@ def render_comparison_detail(pr_info):
     with st.expander("⚙️ Atur bobot custom (opsional)"):
         use_custom = st.checkbox("Set bobot custom di bawah ini")
         st.caption("Total bobot otomatis dijaga 100% — geser satu slider, yang lain menyesuaikan sendiri.")
-        cw1, cw2, cw3, cw4 = st.columns(4)
+        cw1, cw2, cw3 = st.columns(3)
         cw1.slider("💰 Harga", 0, 100, key=k_price, on_change=_rebalance_weights, args=(k_price,))
         cw2.slider("📅 TOP", 0, 100, key=k_top, on_change=_rebalance_weights, args=(k_top,))
-        cw3.slider("📦 Ready Stock", 0, 100, key=k_stock, on_change=_rebalance_weights, args=(k_stock,))
-        cw4.slider("⏱️ Lead Time", 0, 100, key=k_leadtime, on_change=_rebalance_weights, args=(k_leadtime,))
+        cw3.slider("⏱️ Lead Time", 0, 100, key=k_leadtime, on_change=_rebalance_weights, args=(k_leadtime,))
         if use_custom:
             w_price = st.session_state[k_price]
             w_top = st.session_state[k_top]
-            w_stock = st.session_state[k_stock]
             w_leadtime = st.session_state[k_leadtime]
 
     if total_mode:
         st.caption("🏷️ Mode Total Termurah: dipilih **1 vendor** dengan total harga semua item paling rendah (bobot tidak dipakai).")
     elif split_mode:
         st.caption("✂️ Mode Split Qty: item yang tidak di-split dipilih dengan bobot kombinasi; item yang di-split diatur di bagian Split Qty di bawah.")
-        st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Ready Stock {w_stock}% · Lead Time {w_leadtime}%")
+        st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Lead Time {w_leadtime}%")
     else:
-        st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Ready Stock {w_stock}% · Lead Time {w_leadtime}%")
+        st.caption(f"⚖️ Bobot dipakai: Harga {w_price}% · TOP {w_top}% · Lead Time {w_leadtime}%")
 
     raw_q = sb.table("quotes").select("*, rfq_assignments(*, pr_items(*), profiles(*))").execute()
 
@@ -2657,6 +2691,7 @@ def render_comparison_detail(pr_info):
             "top_days": v_profile.get("top_days") or 0,
             "round": q_round,
             "vendor_ref_no": q.get("vendor_ref_no", "-"),
+            "tax_type": q.get("tax_type") or "-",
             "validity_period": q.get("validity_period", "-"),
         })
 
@@ -2725,7 +2760,7 @@ def render_comparison_detail(pr_info):
             if not rows_for_item.empty:
                 worst_case_total += float(rows_for_item["unit_price"].max()) * float(r["Qty"] or 0)
         else:
-            scored = compute_recommendation(rows_for_item, w_price, w_top, w_stock, w_leadtime)
+            scored = compute_recommendation(rows_for_item, w_price, w_top, w_leadtime)
             best_row = scored[scored["is_recommended"]].iloc[0] if not scored.empty and scored["is_recommended"].any() else None
             if best_row is not None:
                 recommended_vendor_per_item[r["Barang"]] = best_row["vendor"]
@@ -2926,7 +2961,7 @@ def render_comparison_detail(pr_info):
     if total_mode:
         weights_dict = {"Total Harga (1 PO)": 100}
     else:
-        weights_dict = {"Harga": w_price, "TOP": w_top, "Ready Stock": w_stock, "Lead Time": w_leadtime}
+        weights_dict = {"Harga": w_price, "TOP": w_top, "Lead Time": w_leadtime}
 
     st.markdown("##### 🤝 Open Final Quotation (Nego)")
     nego_vendors_sel = st.multiselect(
@@ -3702,7 +3737,16 @@ def vendor_portal(vendor_id):
             current_round = max((a.get("current_round") or 1) for a in group["rows"])
             if current_round > 1:
                 st.warning(f"🤝 **Ronde Nego ke-{current_round}** — PIC meminta Anda mengirimkan Final Quotation. Harga di bawah adalah penawaran pertama Anda sebagai referensi, silakan update ke harga terbaik.")
-
+            supplier_ok, supplier_missing = get_supplier_completeness(vendor_id)
+            if not supplier_ok:
+                st.warning(
+                    "⚠️ **Data Supplier belum lengkap** (" + ", ".join(supplier_missing) + "). "
+                    "Lengkapi dulu agar bisa mengirim penawaran."
+                )
+                if st.button("⚙️ Lengkapi Data Supplier", key=f"goto_supplier_{active_rfq_id}"):
+                    st.session_state["vendor_page"] = "Data Supplier"
+                    st.session_state["active_vendor_rfq_id"] = None
+                    st.rerun()
             st.divider()
 
             alamat_kirim = lookup_warehouse_address(group["location"])
@@ -3835,6 +3879,19 @@ def vendor_portal(vendor_id):
                     "Warranty": st.column_config.TextColumn("Warranty", width="small", help="Contoh: 1 Tahun, 6 Bulan, atau '-' kalau tidak ada"),
                 },
             )
+            all_q = [q for a in group["rows"] for q in (a.get("quotes") or [])]
+            all_q.sort(key=lambda q: q.get("round") or 1)
+            prev_tax = next((q["tax_type"] for q in reversed(all_q) if q.get("tax_type")), None)
+            tax_options = ["Include", "Exclude"]
+            tax_val = st.radio(
+                "🧾 Harga di atas sudah termasuk PPN? (Wajib)",
+                tax_options,
+                index=tax_options.index(prev_tax) if prev_tax in tax_options else None,
+                horizontal=True,
+                key=f"tax_type_{active_rfq_id}",
+                help="Include = harga sudah termasuk PPN. Exclude = harga belum termasuk PPN.",
+            )
+
 
             st.markdown("##### 📎 Upload RFQ Resmi / Surat Penawaran")
             st.caption(
@@ -3851,10 +3908,12 @@ def vendor_portal(vendor_id):
                     tahap = "Setelah Nego" if (d.get("stage") or 1) >= 2 else "Awal"
                     st.caption(f"📄 ({tahap}) {d['file_name']} — {d['uploaded_at'][:10]}")
 
-            if st.button("🚀 Kirim Penawaran", type="primary", use_container_width=True):
+            if st.button("🚀 Kirim Penawaran", type="primary", use_container_width=True, disabled=not supplier_ok):
                 has_doc = official_doc is not None or bool(existing_docs)
                 if not vendor_ref_no_val:
                     st.error("❌ Mohon isi Nomor SPH Anda dulu sebelum mengirim penawaran.")
+                elif not tax_val:
+                    st.error("❌ Mohon pilih Include / Exclude PPN dulu sebelum mengirim penawaran.")
                 elif not has_doc:
                     st.error("❌ Mohon upload PDF quotation resmi (kop surat/tandatangan) dulu sebelum mengirim penawaran.")
                 else:
@@ -3867,7 +3926,9 @@ def vendor_portal(vendor_id):
                             r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
                             round_num=current_round, vendor_ref_no=vendor_ref_no_val,
                             validity_period=validity_period_val,
+                            tax_type=tax_val,
                         )
+
                         if not ok:
                             all_ok = False
                             st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
