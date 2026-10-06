@@ -1546,7 +1546,15 @@ def save_spk_approved(pr_id, vendor_id, file):
 
 def get_pic_profile(pr_info):
     """Profil PIC pemilik RFQ (uploaded_by). Kalau gak ada, pakai user yang sedang login."""
-    uid = (pr_info or {}).get("uploaded_by") or (st.session_state.get("user_info") or {}).get("id")
+    uid = None
+    try:
+        uid = pr_info.get("uploaded_by") if pr_info is not None else None  # pr_info bisa dict / pandas Series
+        if uid is None or pd.isna(uid) or not str(uid).strip():
+            uid = None
+    except Exception:
+        uid = None
+    if not uid:
+        uid = (st.session_state.get("user_info") or {}).get("id")
     if not uid:
         return {}
     try:
