@@ -2549,7 +2549,9 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
 def build_cqr_pdf_files(rfq_title, pr_code, loc, weights, display_df, cost_saving, saving_pct,
                         recommended_total, ai_insight_text, summary_df, split_data, highlight_map,
                         grand_total_vendors, df_m, split_mode, split_alloc_rows):
-    """Return list of (label, pdf_bytes). >1 vendor pemenang -> 1 PDF per vendor (hanya item yang dimenangkan)."""
+    """Return list of (label, pdf_bytes). >1 vendor pemenang -> 1 PDF per vendor pemenang.
+    Tiap PDF hanya berisi item yang dimenangkan vendor itu, TAPI tetap menampilkan harga
+    SEMUA vendor (pembanding) + highlight hijau pemenang."""
     if len(split_data) <= 1:
         b = generate_cqr_pdf(
             rfq_title, pr_code, loc, weights, display_df, cost_saving, saving_pct, recommended_total,
@@ -2559,47 +2561,57 @@ def build_cqr_pdf_files(rfq_title, pr_code, loc, weights, display_df, cost_savin
         return [("Price Comparison", b)] if b else []
 
     rp = lambda n: f"Rp {float(n):,.0f}".replace(",", ".")
-    qty_fmt = lambda q: f"{float(q):g}"
     pct_lookup = {(r["Barang"], r["Vendor"]): r["Persen"] for r in split_alloc_rows}
     split_barang = {r["Barang"] for r in split_alloc_rows}
+
+    # daftar vendor pembanding (semua vendor yang ada kolomnya di display_df)
+    suffix = " — Price/Unit"
+    all_vendors = [c[: -len(suffix)] for c in display_df.columns if c.endswith(suffix)]
+
+    body_df = display_df[display_df["Barang"] != "GRAND TOTAL"]
     files = []
 
     for v_name, items in split_data.items():
-        rows = []
-        for it in items:
-            is_split_item = split_mode and it["Barang"] in split_barang
-            pct = pct_lookup.get((it["Barang"], v_name))
-            rows.append({
-                "Barang": it["Barang"],
-                "Qty": qty_fmt(it["Qty"]),
-                "UOM": it["UOM"],
-                f"{v_name} — Price/Unit": rp(it["Unit Price"]),
-                f"{v_name} — Total": rp(it["Total"]),
-                "🏆 Rekomendasi": f"Split {pct:g}%" if (is_split_item and pct is not None) else v_name,
-            })
-        v_total = sum(float(it["Total"]) for it in items)
-        rows.append({
-            "Barang": "GRAND TOTAL", "Qty": "", "UOM": "",
-            f"{v_name} — Price/Unit": "", f"{v_name} — Total": rp(v_total),
-            "🏆 Rekomendasi": rp(v_total),
-        })
-        sub = pd.DataFrame(rows)
+        won = {it["Barang"] for it in items}
 
+        # 1) Ambil baris item yang dimenangkan vendor ini -- SEMUA kolom vendor tetap ada
+        sub = body_df[body_df["Barang"].isin(won)].copy().reset_index(drop=True)
+
+        # 2) Kolom rekomendasi: kalau item di-split tampilkan persennya
+        def _rec(barang, current):
+            pct = pct_lookup.get((barang, v_name))
+            if split_mode and barang in split_barang and pct is not None:
+                return f"Split {pct:g}%"
+            return current
+        sub["🏆 Rekomendasi"] = [_rec(b, c) for b, c in zip(sub["Barang"], sub["🏆 Rekomendasi"])]
+
+        # 3) GRAND TOTAL: total tiap vendor HANYA untuk item yang dimenangkan (apple to apple)
+        v_total = sum(float(it["Total"]) for it in items)
+        gt = {"Barang": "GRAND TOTAL", "Qty": "", "UOM": ""}
+        for v in all_vendors:
+            vt = df_m[(df_m["vendor"] == v) & (df_m["Barang"].isin(won))]["total"].sum()
+            gt[f"{v}{suffix}"] = ""
+            gt[f"{v} — Total"] = rp(vt) if vt else "-"
+        gt["🏆 Rekomendasi"] = rp(v_total)
+        sub = pd.concat([sub, pd.DataFrame([gt])], ignore_index=True)
+
+        # 4) Cost saving khusus item yang dimenangkan vendor ini
         v_worst = sum(
             float(df_m[df_m["Barang"] == it["Barang"]]["price"].max()) * float(it["Qty"]) for it in items
         )
         v_saving = v_worst - v_total
         v_pct = (v_saving / v_worst * 100) if v_worst > 0 else 0
 
-        v_summary = summary_df[["Kriteria", v_name]] if (summary_df is not None and v_name in summary_df.columns) else None
+        # 5) Highlight hijau: pakai highlight_map asli, dibatasi ke item yang dimenangkan
+        v_highlight = {b: vs for b, vs in (highlight_map or {}).items() if b in won}
 
-        won = {it["Barang"] for it in items}
+        v_summary = summary_df if summary_df is not None else None
         v_alloc = [r for r in split_alloc_rows if r["Barang"] in won] if split_mode else None
 
         b = generate_cqr_pdf(
             f"{rfq_title} — {v_name}", pr_code, loc, weights, sub, v_saving, v_pct, v_total,
-            ai_insight_text, summary_df=v_summary, split_data=None, highlight_map={},
-            grand_total_vendors=[], df_m=df_m, split_mode=split_mode, split_alloc=v_alloc,
+            ai_insight_text, summary_df=v_summary, split_data=None, highlight_map=v_highlight,
+            grand_total_vendors=[v_name], df_m=df_m, split_mode=split_mode, split_alloc=v_alloc,
         )
         if b:
             files.append((v_name, b))
