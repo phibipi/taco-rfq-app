@@ -369,6 +369,7 @@ def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items
         f"Daftar Item:\n{items_text}\n\n"
         f"{login_info_txt}"
         f"Silakan login ke portal: https://proctaco.streamlit.app/\n\n"
+        f"Video Tutorial Penggunaan Web: https://bit.ly/RFQtaco\n\n"
         f"Salam,\nTACO Procurement Team"
     )
 
@@ -437,6 +438,7 @@ def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items
 {items_html}
 {login_html}
 <p>Silakan login ke portal: <a href="https://proctaco.streamlit.app/">https://proctaco.streamlit.app/</a></p>
+<p>Video Tutorial Penggunaan Web: <a href="https://bit.ly/RFQtaco">https://bit.ly/RFQtaco</a></p>
 <p>Salam,<br>TACO Procurement Team</p>
 </body></html>
 """
@@ -1005,7 +1007,7 @@ def request_nego(pr_id, vendor_ids, note=""):
                         f"Dear {v_name},\n\n"
                         f"Mohon dapat mengirimkan Final Quotation (harga terbaik) untuk RFQ terkait.\n"
                         f"{('Catatan dari PIC: ' + note) if note else ''}\n\n"
-                        f"Silakan login ke portal dan submit ulang penawaran Anda: https://taco-rfq.streamlit.app/\n\n"
+                        f"Silakan login ke portal dan submit ulang penawaran Anda: https://proctaco.streamlit.app/\n\n"
                         f"Salam,\nTACO Procurement Team"
                     )
                     msg = MIMEMultipart()
@@ -3753,7 +3755,7 @@ def send_pending_reminders(pr_info, pending, vendor_ids):
                 f"Judul RFQ: {rfq_title}\n"
                 f"Jumlah item: {info['n_items']}\n"
                 f"Batas Waktu: {info['deadline'] or '-'}\n\n"
-                f"Silakan login & submit di portal: https://taco-rfq.streamlit.app/\n\n"
+                f"Silakan login & submit di portal: https://proctaco.streamlit.app/\n\n"
                 f"Abaikan email ini jika Anda sudah mengirim.\n\n"
                 f"Salam,\nTACO Procurement Team"
             )
