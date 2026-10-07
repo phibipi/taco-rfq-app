@@ -4351,7 +4351,7 @@ def vendor_portal(vendor_id):
     st.sidebar.markdown("---")
 
     v_menus = [
-        ("⚙️ Data Supplier", "v_supplier"),
+        ("⚙️ Data Perusahaan", "v_supplier"),
         ("📋 List RFQ Aktif", "v_rfq"),
         ("🔍 History Penawaran", "v_history"),
     ]
