@@ -327,8 +327,12 @@ def bulk_register_users(df, role):
 
 
 def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items_text,
-                   delivery_type, pic_notes, files, vendor_password=None):
-    """Kirim email RFQ ke SELURUH email vendor (bisa multi-email dipisah ';')."""
+                   delivery_type, pic_notes, files, vendor_password=None, items_df=None):
+    """Kirim email RFQ ke SELURUH email vendor (bisa multi-email dipisah ';').
+    Kalau items_df diberikan -> daftar item tampil sebagai TABEL (HTML),
+    items_text tetap dipakai sebagai versi teks biasa (fallback)."""
+    from html import escape as h
+
     if "email_config" not in st.secrets:
         st.error("Konfigurasi 'email_config' tidak ditemukan di st.secrets")
         return False
@@ -339,41 +343,114 @@ def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items
         st.error("'smtp_password' masih kosong di st.secrets")
         return False
 
-    # Pecah daftar email (pisahkan berdasarkan ';')
     recipients = [clean(e).lower() for e in str(vendor_email_str).split(";") if clean(e)]
     if not recipients:
         return False
 
     primary_email = recipients[0]
     subject = f"Request for Quotation - TACO - {datetime.now().strftime('%d %b %Y')}"
+    notes_txt = pic_notes if pic_notes else "-"
 
-    login_info = (
+    # ---------------- versi teks biasa (fallback) ----------------
+    login_info_txt = (
         f"\n🔐 Info Login Portal Anda:\n"
         f"Username (Email Utama): {primary_email}\n"
         f"Password: {vendor_password}\n"
         f"(Mohon simpan baik-baik password ini untuk login ke portal)\n\n"
         if vendor_password else ""
     )
-
-    body = (
+    body_txt = (
         f"Dear {vendor_name},\n\n"
         f"Kami mengundang Anda untuk mengisi Request for Quotation (RFQ):\n\n"
         f"Judul RFQ: {rfq_title}\n"
         f"Batas Waktu Pengisian: {deadline_str}\n"
         f"Metode Pengiriman: {delivery_type}\n"
-        f"Catatan Tambahan PIC: {pic_notes if pic_notes else '-'}\n\n"
+        f"Catatan Tambahan PIC: {notes_txt}\n\n"
         f"Daftar Item:\n{items_text}\n\n"
-        f"{login_info}"
+        f"{login_info_txt}"
         f"Silakan login ke portal: https://taco-rfq.streamlit.app/\n\n"
         f"Salam,\nTACO Procurement Team"
     )
 
+    # ---------------- versi HTML (tabel item) ----------------
+    th = "border:1px solid #cbd5e1;padding:6px 8px;background:#ED7D31;color:#fff;font-size:13px;"
+    td = "border:1px solid #cbd5e1;padding:6px 8px;font-size:13px;vertical-align:top;"
+
+    if items_df is not None and len(items_df) > 0:
+        rows_html = ""
+        for i, (_, r) in enumerate(items_df.iterrows(), start=1):
+            d1 = clean(r.get("DESCRIPTION", ""))
+            d2 = clean(r.get("DESCRIPTION_2", ""))
+            desc = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
+            qty = r.get("QUANTITY", "")
+            try:
+                qf = float(qty)
+                qty = str(int(qf)) if qf == int(qf) else f"{qf:g}"
+            except Exception:
+                qty = clean(qty)
+            note = clean(r.get("CATATAN_BARIS_ATAU_LINK_GAMBAR", "")) or "-"
+            rows_html += (
+                "<tr>"
+                f"<td style='{td}text-align:center;'>{i}</td>"
+                f"<td style='{td}'>{h(clean_description(desc))}</td>"
+                f"<td style='{td}text-align:center;'>{h(qty)}</td>"
+                f"<td style='{td}text-align:center;'>{h(clean(r.get('UOM', '')))}</td>"
+                f"<td style='{td}'>{h(note)}</td>"
+                "</tr>"
+            )
+        items_html = (
+            "<table style='border-collapse:collapse;width:100%;max-width:720px;'>"
+            "<thead><tr>"
+            f"<th style='{th}width:36px;'>No</th>"
+            f"<th style='{th}text-align:left;'>Nama Barang</th>"
+            f"<th style='{th}width:60px;'>Qty</th>"
+            f"<th style='{th}width:70px;'>UOM</th>"
+            f"<th style='{th}text-align:left;'>Catatan</th>"
+            f"</tr></thead><tbody>{rows_html}</tbody></table>"
+        )
+    else:
+        items_html = f"<pre style='font-family:inherit;'>{h(items_text)}</pre>"
+
+    login_html = (
+        "<div style='background:#fff7ed;border:1px solid #fdba74;border-radius:6px;"
+        "padding:10px 12px;margin:14px 0;max-width:720px;'>"
+        "<b>🔐 Info Login Portal Anda</b><br>"
+        f"Username (Email Utama): <b>{h(primary_email)}</b><br>"
+        f"Password: <b>{h(str(vendor_password))}</b><br>"
+        "<span style='font-size:12px;color:#555;'>(Mohon simpan baik-baik password ini untuk login ke portal)</span>"
+        "</div>"
+        if vendor_password else ""
+    )
+
+    body_html = f"""
+<html><body style="font-family:Calibri,Arial,sans-serif;font-size:14px;color:#111;">
+<p>Dear {h(vendor_name)},</p>
+<p>Kami mengundang Anda untuk mengisi Request for Quotation (RFQ):</p>
+<table style="border-collapse:collapse;margin-bottom:12px;">
+  <tr><td style="padding:2px 12px 2px 0;"><b>Judul RFQ</b></td><td>: {h(rfq_title)}</td></tr>
+  <tr><td style="padding:2px 12px 2px 0;"><b>Batas Waktu Pengisian</b></td><td>: {h(deadline_str)}</td></tr>
+  <tr><td style="padding:2px 12px 2px 0;"><b>Metode Pengiriman</b></td><td>: {h(delivery_type)}</td></tr>
+  <tr><td style="padding:2px 12px 2px 0;vertical-align:top;"><b>Catatan Tambahan PIC</b></td>
+      <td>: {h(notes_txt).replace(chr(10), '<br>')}</td></tr>
+</table>
+<p><b>Daftar Item:</b></p>
+{items_html}
+{login_html}
+<p>Silakan login ke portal: <a href="https://taco-rfq.streamlit.app/">https://taco-rfq.streamlit.app/</a></p>
+<p>Salam,<br>TACO Procurement Team</p>
+</body></html>
+"""
+
     try:
-        msg = MIMEMultipart()
+        msg = MIMEMultipart("mixed")
         msg["From"] = sender_email
-        msg["To"] = ", ".join(recipients)  # Kirim sekaligus ke semua email vendor
+        msg["To"] = ", ".join(recipients)
         msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain"))
+
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(body_txt, "plain", "utf-8"))
+        alt.attach(MIMEText(body_html, "html", "utf-8"))   # yang terakhir = yang diprioritaskan client email
+        msg.attach(alt)
 
         for f in files:
             part = MIMEBase("application", "octet-stream")
@@ -2996,7 +3073,7 @@ def render_import_workspace(df_display):
                                 target_email, v_name, rfq_title_val,
                                 rfq_deadline_val.strftime("%d %b %Y"), items_text_email,
                                 delivery_type_val, pic_notes_val, attached_files or [],
-                                vendor_password=new_password,
+                                vendor_password=new_password,items_df=edited,
                             )
 
                     # Email vendor berubah -> cache vendor perlu di-refresh
