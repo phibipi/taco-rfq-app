@@ -1488,21 +1488,29 @@ def _identify_winners_and_losers(pivot_items, df_m, split_toggle_map, split_allo
 @st.cache_data(ttl=600, show_spinner=False)
 def get_warehouse_addresses():
     res = sb.table("warehouse_addresses").select("origin, alamat").execute()
-    return {clean(r["origin"]).lower(): r["alamat"] for r in (res.data or [])}
+    return {
+        clean(r["origin"]).lower(): r["alamat"]
+        for r in (res.data or [])
+        if clean(r.get("origin")) and clean(r.get("alamat"))   # baris kosong diabaikan
+    }
 
 
 def lookup_warehouse_address(location):
     """Cocokkan lokasi PR ke alamat gudang. Exact match dulu, lalu yang
     namanya paling panjang yang terkandung di lokasi. Kalau gak ketemu, balik lokasi aslinya."""
-    loc = clean(location).lower()
+    norm = lambda x: " ".join(clean(x).lower().split())
+    loc = norm(location)
     if not loc:
         return "-"
-    addr_map = get_warehouse_addresses()
+    addr_map = {norm(k): v for k, v in get_warehouse_addresses().items()}
     if loc in addr_map:
         return addr_map[loc]
     hits = [k for k in addr_map if k in loc]
     if hits:
         return addr_map[max(hits, key=len)]
+    hits = [k for k in addr_map if loc in k]
+    if hits:
+        return addr_map[min(hits, key=len)]
     return clean(location) or "-"
 
 
