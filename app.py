@@ -2386,13 +2386,13 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
         return Paragraph("<br/>".join(_esc(_strip_emoji_for_pdf(t)) for t in text.split("\n")), body_cell_style)
 
     n_v = len(vendors)
-    head0 = [_P("Barang", header_cell_style), _P("Qty", header_cell_style), _P("UOM", header_cell_style)]
-    head1 = ["", "", ""]
+    head0 = [_P("", header_cell_style)] * 3
+    head1 = [_P("Barang", header_cell_style), _P("Qty", header_cell_style), _P("UOM", header_cell_style)]
     for v in vendors:
         head0 += [_P(v, header_cell_style), "", ""]
         head1 += [_P("Brand / Stock / Lead Time", header_cell_style), _P("Harga", header_cell_style), _P("Total", header_cell_style)]
-    head0.append(_P("Rekomendasi", header_cell_style))
-    head1.append("")
+    head0.append(_P("", header_cell_style))
+    head1.append(_P("Rekomendasi", header_cell_style))
 
     data = [head0, head1]
     n_items = len(display_df) - 1  # baris terakhir = GRAND TOTAL
@@ -2414,7 +2414,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
         widths += [avail_width * per_vendor * 0.38, avail_width * per_vendor * 0.29, avail_width * per_vendor * 0.33]
     widths.append(avail_width * fixed["rec"])
 
-    tbl = Table(data, colWidths=widths, repeatRows=2)
+    tbl = Table(data, colWidths=widths, repeatRows=2, splitByRow=1)
     last_idx = len(data) - 1
     cmds = [
         ("BACKGROUND", (0, 0), (-1, 1), dark),
@@ -2422,8 +2422,8 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 2), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
         ("BACKGROUND", (0, last_idx), (-1, last_idx), colors.HexColor("#e2e8f0")),
-        ("SPAN", (0, 0), (0, 1)), ("SPAN", (1, 0), (1, 1)), ("SPAN", (2, 0), (2, 1)),
-        ("SPAN", (3 + 3 * n_v, 0), (3 + 3 * n_v, 1)),
+        ("LINEBELOW", (0, 0), (2, 0), 0.5, dark),
+        ("LINEBELOW", (3 + 3 * n_v, 0), (3 + 3 * n_v, 0), 0.5, dark),
     ]
     for vi in range(n_v):
         c0 = 3 + 3 * vi
@@ -2494,32 +2494,23 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     # Rincian PO per vendor pemenang (selalu langsung per pemenang)
     # ------------------------------------------------------------------
     if split_data:
-        elements.append(Paragraph("Rincian PO per Vendor Pemenang", h2_style))
+        elements.append(Paragraph("Ringkasan PO per Vendor Pemenang", h2_style))
+        rows = [["Vendor", "Jumlah Item", "Subtotal PO"]]
         grand_po = 0
         for v_name, items in split_data.items():
-            df_split = pd.DataFrame(items)
-            subtotal = df_split["Total"].sum()
-            grand_po += subtotal
-            elements.append(Paragraph(f"<b>{_esc(str(v_name))}</b> — Subtotal: Rp {subtotal:,.0f}".replace(",", "."), normal_style))
-            elements.append(Spacer(1, 2))
-            po_cols = ["Barang", "Qty", "UOM", "Brand", "Unit Price", "Total", "Lead Time"]
-            po_rows = [po_cols] + [
-                [str(r["Barang"]), f"{float(r['Qty']):g}", str(r["UOM"]), str(r["Brand"]),
-                 f"Rp {r['Unit Price']:,.0f}".replace(",", "."), f"Rp {r['Total']:,.0f}".replace(",", "."),
-                 f"{r.get('Lead Time (Hari)')} hari" if r.get("Lead Time (Hari)") else "-"]
-                for r in items
-            ]
-            po_wrapped = [[_P(val, header_cell_style if ri == 0 else body_cell_style) for val in row] for ri, row in enumerate(po_rows)]
-            po_tbl = Table(po_wrapped, colWidths=[avail_width * w for w in (0.30, 0.07, 0.07, 0.14, 0.14, 0.15, 0.13)], repeatRows=1)
-            po_tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), dark),
-                ("GRID", (0, 0), (-1, -1), 0.5, grid),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-            ]))
-            elements.append(po_tbl)
-            elements.append(Spacer(1, 10))
-        elements.append(Paragraph(f"<b>Total seluruh PO: Rp {grand_po:,.0f}</b>".replace(",", "."), normal_style))
+            sub = sum(float(i["Total"]) for i in items)
+            grand_po += sub
+            rows.append([str(v_name), str(len(items)), f"Rp {sub:,.0f}".replace(",", ".")])
+        rows.append(["TOTAL", "", f"Rp {grand_po:,.0f}".replace(",", ".")])
+        wrapped = [[_P(val, header_cell_style if ri == 0 else body_cell_style) for val in row] for ri, row in enumerate(rows)]
+        po_tbl = Table(wrapped, colWidths=[avail_width * w for w in (0.55, 0.15, 0.30)], repeatRows=1)
+        po_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), dark),
+            ("GRID", (0, 0), (-1, -1), 0.5, grid),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BACKGROUND", (0, len(rows) - 1), (-1, len(rows) - 1), colors.HexColor("#e2e8f0")),
+        ]))
+        elements.append(po_tbl)
         elements.append(Spacer(1, 10))
 
     if ai_insight_text:
