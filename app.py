@@ -1808,7 +1808,7 @@ def _confirm_close_rfq_dialog(pr_info, winner_items, losing_vendors, df_m, vendo
         st.rerun()
 
 
-def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name, cqr_pdf_bytes=None, ai_included=False):
+def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name, cqr_files=None, ai_included=False):
     pr_id = pr_info["id"]
     st.markdown("##### 📜 Awarding & Final Close RFQ")
     st.caption("Alur: **① Download Price COmparison → ② Download SPK → ③ Upload SPK approved → ④ Close RFQ & kirim email.**")
@@ -1822,15 +1822,18 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
 
     # ① Download CQR
     st.markdown("**① Download Price Comparison**")
-    if cqr_pdf_bytes:
+    if cqr_files:
         if ai_included:
             st.caption("✅ AI Insight ikut tercetak di PDF Price Comparison.")
         else:
             st.caption("ℹ️ AI Insight belum di-generate — klik 🤖 Asisten AI → Generate Insight dulu kalau mau ikut masuk PDF.")
-        st.download_button(
-            "📄 Download Price Comparison (PDF)", cqr_pdf_bytes, f"Price Comparison_{pr_info.get('rfq_title') or pr_info['pr_code']}.pdf",
-            mime="application/pdf", key=f"dl_cqr_{pr_id}", use_container_width=True,
-        )
+        base = _safe_filename(pr_info.get("rfq_title") or pr_info["pr_code"])
+        for label, b in cqr_files:
+            fname = f"Price_Comparison_{base}.pdf" if len(cqr_files) == 1 else f"Price_Comparison_{base}_{_safe_filename(label)}.pdf"
+            st.download_button(
+                f"📄 Download Price Comparison — {label} (PDF)", b, fname,
+                mime="application/pdf", key=f"dl_cqr_{pr_id}_{_safe_filename(label)}", use_container_width=True,
+            )
     else:
         st.caption("⚠️ Library `reportlab` belum terinstall.")
 
@@ -2310,7 +2313,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib import colors
         from reportlab.lib.units import mm
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, CondPageBreak
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     except ImportError:
         return None
@@ -2322,7 +2325,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     )
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("TitleCustom", parent=styles["Title"], fontSize=16, spaceAfter=4)
-    h2_style = ParagraphStyle("H2Custom", parent=styles["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor("#1f2937"), keepWithNext=1)
+    h2_style = ParagraphStyle("H2Custom", parent=styles["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor("#1f2937"))
     normal_style = ParagraphStyle("NormalCustom", parent=styles["Normal"], fontSize=9, leading=12)
     bullet_style = ParagraphStyle("BulletCustom", parent=normal_style, leftIndent=12)
     ai_head_style = ParagraphStyle("AIHead", parent=normal_style, fontSize=10, fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=2)
@@ -2361,6 +2364,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     # TABEL PERBANDINGAN: per vendor = [Brand/Stock/Lead Time | Price/Unit | Total]
     # (brand, ready stock, lead time sifatnya beda tiap item -> ikut di tabel item)
     # ------------------------------------------------------------------
+    elements.append(CondPageBreak(50 * mm))
     elements.append(Paragraph("Tabel Perbandingan", h2_style))
     cols = list(display_df.columns)
     vendors = [c[: -len(" — Price/Unit")] for c in cols if c.endswith(" — Price/Unit")]
@@ -2452,6 +2456,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     if summary_df is not None and not summary_df.empty:
         summary_pdf = summary_df[~summary_df["Kriteria"].isin(["Brand", "Ready Stock", "Lead Time (Hari)"])]
         if not summary_pdf.empty:
+            elements.append(CondPageBreak(50 * mm))
             elements.append(Paragraph("Ringkasan per Vendor", h2_style))
             sum_rows = [list(summary_pdf.columns)] + [[str(v) for v in row] for row in summary_pdf.values]
             sum_wrapped = []
@@ -2473,6 +2478,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     # Alokasi Split Qty: HANYA kalau prioritas = Split Qty
     # ------------------------------------------------------------------
     if split_mode and split_alloc:
+        elements.append(CondPageBreak(50 * mm))
         elements.append(Paragraph("Alokasi Split Qty", h2_style))
         sa_cols = ["Barang", "Vendor", "Alokasi (%)", "Qty", "UOM"]
         sa_rows = [sa_cols] + [
@@ -2494,6 +2500,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     # Rincian PO per vendor pemenang (selalu langsung per pemenang)
     # ------------------------------------------------------------------
     if split_data:
+        elements.append(CondPageBreak(50 * mm))
         elements.append(Paragraph("Ringkasan PO per Vendor Pemenang", h2_style))
         rows = [["Vendor", "Jumlah Item", "Subtotal PO"]]
         grand_po = 0
@@ -2514,6 +2521,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
         elements.append(Spacer(1, 10))
 
     if ai_insight_text:
+        elements.append(CondPageBreak(50 * mm))
         elements.append(Paragraph("AI Procurement Insight", h2_style))
         for raw_line in str(ai_insight_text).split("\n"):
             line = _strip_emoji_for_pdf(raw_line)
@@ -2538,7 +2546,64 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     doc.build(elements)
     buffer.seek(0)
     return buffer.getvalue()
+def build_cqr_pdf_files(rfq_title, pr_code, loc, weights, display_df, cost_saving, saving_pct,
+                        recommended_total, ai_insight_text, summary_df, split_data, highlight_map,
+                        grand_total_vendors, df_m, split_mode, split_alloc_rows):
+    """Return list of (label, pdf_bytes). >1 vendor pemenang -> 1 PDF per vendor (hanya item yang dimenangkan)."""
+    if len(split_data) <= 1:
+        b = generate_cqr_pdf(
+            rfq_title, pr_code, loc, weights, display_df, cost_saving, saving_pct, recommended_total,
+            ai_insight_text, summary_df=summary_df, split_data=split_data, highlight_map=highlight_map,
+            grand_total_vendors=grand_total_vendors, df_m=df_m, split_mode=split_mode, split_alloc=split_alloc_rows,
+        )
+        return [("Price Comparison", b)] if b else []
 
+    rp = lambda n: f"Rp {float(n):,.0f}".replace(",", ".")
+    qty_fmt = lambda q: f"{float(q):g}"
+    pct_lookup = {(r["Barang"], r["Vendor"]): r["Persen"] for r in split_alloc_rows}
+    split_barang = {r["Barang"] for r in split_alloc_rows}
+    files = []
+
+    for v_name, items in split_data.items():
+        rows = []
+        for it in items:
+            is_split_item = split_mode and it["Barang"] in split_barang
+            pct = pct_lookup.get((it["Barang"], v_name))
+            rows.append({
+                "Barang": it["Barang"],
+                "Qty": qty_fmt(it["Qty"]),
+                "UOM": it["UOM"],
+                f"{v_name} — Price/Unit": rp(it["Unit Price"]),
+                f"{v_name} — Total": rp(it["Total"]),
+                "🏆 Rekomendasi": f"Split {pct:g}%" if (is_split_item and pct is not None) else v_name,
+            })
+        v_total = sum(float(it["Total"]) for it in items)
+        rows.append({
+            "Barang": "GRAND TOTAL", "Qty": "", "UOM": "",
+            f"{v_name} — Price/Unit": "", f"{v_name} — Total": rp(v_total),
+            "🏆 Rekomendasi": rp(v_total),
+        })
+        sub = pd.DataFrame(rows)
+
+        v_worst = sum(
+            float(df_m[df_m["Barang"] == it["Barang"]]["price"].max()) * float(it["Qty"]) for it in items
+        )
+        v_saving = v_worst - v_total
+        v_pct = (v_saving / v_worst * 100) if v_worst > 0 else 0
+
+        v_summary = summary_df[["Kriteria", v_name]] if (summary_df is not None and v_name in summary_df.columns) else None
+
+        won = {it["Barang"] for it in items}
+        v_alloc = [r for r in split_alloc_rows if r["Barang"] in won] if split_mode else None
+
+        b = generate_cqr_pdf(
+            f"{rfq_title} — {v_name}", pr_code, loc, weights, sub, v_saving, v_pct, v_total,
+            ai_insight_text, summary_df=v_summary, split_data=None, highlight_map={},
+            grand_total_vendors=[], df_m=df_m, split_mode=split_mode, split_alloc=v_alloc,
+        )
+        if b:
+            files.append((v_name, b))
+    return files
 
 def show_login():
     st.title("🛠️ TACO Sparepart RFQ")
@@ -3378,12 +3443,11 @@ def render_comparison_detail(pr_info):
     )
 
     ai_insight_text = st.session_state.get(f"ai_insight_{rfq_title_active}", "")
-    pdf_bytes = generate_cqr_pdf(
+    cqr_files = build_cqr_pdf_files(
         rfq_title_active, pr_info["pr_code"], loc_active, weights_dict,
         display_df, cost_saving, saving_pct, recommended_total, ai_insight_text,
-        summary_df=summary_df, split_data=split_data,
-        highlight_map=highlight_map, grand_total_vendors=grand_total_vendors,
-        df_m=df_m, split_mode=split_mode, split_alloc=split_alloc_rows,
+        summary_df, split_data, highlight_map, grand_total_vendors,
+        df_m, split_mode, split_alloc_rows,
     )
 
     # -----------------------------------------------------------------
@@ -3392,7 +3456,7 @@ def render_comparison_detail(pr_info):
     st.divider()
     render_awarding_section(
         pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map,
-        pivot_items, df_m, vendor_id_to_name, cqr_pdf_bytes=pdf_bytes,
+        pivot_items, df_m, vendor_id_to_name, cqr_files=cqr_files,
         ai_included=bool(ai_insight_text),
     )
 
