@@ -368,7 +368,7 @@ def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items
         f"Catatan Tambahan PIC: {notes_txt}\n\n"
         f"Daftar Item:\n{items_text}\n\n"
         f"{login_info_txt}"
-        f"Silakan login ke portal: https://taco-rfq.streamlit.app/\n\n"
+        f"Silakan login ke portal: https://proctaco.streamlit.app/\n\n"
         f"Salam,\nTACO Procurement Team"
     )
 
@@ -436,7 +436,7 @@ def send_rfq_email(vendor_email_str, vendor_name, rfq_title, deadline_str, items
 <p><b>Daftar Item:</b></p>
 {items_html}
 {login_html}
-<p>Silakan login ke portal: <a href="https://taco-rfq.streamlit.app/">https://taco-rfq.streamlit.app/</a></p>
+<p>Silakan login ke portal: <a href="https://proctaco.streamlit.app/">https://proctaco.streamlit.app/</a></p>
 <p>Salam,<br>TACO Procurement Team</p>
 </body></html>
 """
