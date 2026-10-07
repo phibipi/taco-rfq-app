@@ -58,7 +58,12 @@ def clean(s):
     except (TypeError, ValueError):
         pass
     return str(s).strip()
-
+    
+def _safe_filename(s, max_len=60):
+    """Bersihkan teks buat nama file: buang karakter terlarang, spasi jadi underscore."""
+    s = re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", clean(s))
+    s = re.sub(r"\s+", "_", s).strip("._")
+    return s[:max_len] or "RFQ"
 
 def scroll_to_top():
     """Paksa halaman scroll ke atas (Streamlit default-nya mempertahankan posisi scroll)."""
@@ -1754,7 +1759,7 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
             awarding_items_text=items_text,
             total_amount=f"{total_amount:,.0f}".replace(",", "."),
         )
-        attachments = [(spk_doc["file_name"], spk_bytes)]
+        attachments = [(f"SPK_{_safe_filename(rfq_title)}_{_safe_filename(v_name)}.pdf", spk_bytes)]
         send_custom_email(v_email, f"🎉 AWARDING LETTER - RFQ: {rfq_title}", email_body, attachments)
 
     # B. Kirim Email Thank You ke Vendor Lain
@@ -1836,12 +1841,14 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
         with st.spinner("Membuat SPK untuk semua vendor pemenang..."):
             st.session_state[spk_key] = generate_spk_for_winners(pr_info, winner_items, df_m, vendor_id_to_name)
     st.caption("Klik Generate lagi kalau ada perubahan pemenang / qty / data vendor.")
+    rfq_fn = _safe_filename(pr_info.get("rfq_title") or pr_info["pr_code"])
     generated = st.session_state.get(spk_key, {})
     for v_name in winner_items:
         g = generated.get(v_name)
         if g and g.get("bytes"):
             st.download_button(
-                f"⬇️ SPK — {v_name}", g["bytes"], f"SPK_{v_name}.{g['ext']}",
+                f"⬇️ SPK — {v_name}", g["bytes"],
+                f"SPK_{rfq_fn}_{_safe_filename(v_name)}.{g['ext']}",
                 key=f"dl_spk_{pr_id}_{v_name}", use_container_width=True,
             )
         elif g:
@@ -2945,7 +2952,7 @@ def render_comparison_detail(pr_info):
 
     st.title(f"📊 {rfq_title_active}")
     st.caption(f"📍 Lokasi Pengiriman: **{loc_active}** | No. PR: **{pr_info['pr_code']}**")
-
+    render_pending_reminder_box(pr_info) 
     st.markdown("---")
     st.subheader("📋 Matrix Perbandingan Penawaran Vendor")
 
@@ -3540,69 +3547,114 @@ def proc_portal_comparison():
                 st.info("Tidak ada RFQ yang cocok dengan pencarian.")
 
 
-# =====================================================================
-# AUTO-REMINDER VENDOR
-# =====================================================================
-def check_and_send_vendor_reminders(pr_id, rfq_title):
-    """
-    Mengecek vendor mana saja yang belum mengisi penawaran (quotes)
-    dan otomatis mengirimkan email reminder.
-    """
-    res_ass = (
+def get_pending_vendors(pr_id):
+    """{vendor_id: info} untuk vendor yang BELUM submit di ronde saat ini (per RFQ)."""
+    res = (
         sb.table("rfq_assignments")
-        .select("id, vendor_id, deadline, profiles(vendor_name, email), pr_items!inner(pr_id)")
+        .select("id, vendor_id, deadline, current_round, profiles(vendor_name, email), pr_items!inner(pr_id)")
         .eq("pr_items.pr_id", pr_id)
         .eq("status", "Open")
         .execute()
     )
+    rows = res.data or []
+    if not rows:
+        return {}
+    ass_ids = [a["id"] for a in rows]
+    qres = sb.table("quotes").select("assignment_id, round").in_("assignment_id", ass_ids).execute()
+    done = {(q["assignment_id"], q.get("round") or 1) for q in (qres.data or [])}
 
-    if not res_ass.data:
-        return 0
-
-    quotes_res = sb.table("quotes").select("assignment_id").execute()
-    submitted_ids = set([q["assignment_id"] for q in quotes_res.data]) if quotes_res.data else set()
-
-    reminded_count = 0
-    for ass in res_ass.data:
-        if ass["id"] not in submitted_ids:
-            v_profile = ass.get("profiles") or {}
-            v_email = v_profile.get("email")
-            v_name = v_profile.get("vendor_name", "Vendor")
-            deadline_str = ass.get("deadline", "Segera")
-
-            if v_email:
-                subject = f"⏰ REMINDER: Undangan RFQ - TACO - {rfq_title}"
-                body = (
-                    f"Dear {v_name},\n\n"
-                    f"Ini adalah pengingat otomatis bahwa Anda belum mengisi Request for Quotation (RFQ):\n\n"
-                    f"Judul RFQ: {rfq_title}\n"
-                    f"Batas Waktu: {deadline_str}\n\n"
-                    f"Mohon untuk segera mengisi penawaran harga Anda di portal: https://taco-rfq.streamlit.app/\n\n"
-                    f"Salam,\nTACO Procurement Team"
-                )
-
-                try:
-                    msg = MIMEMultipart()
-                    msg["From"] = st.secrets["email_config"].get("smtp_user", "")
-                    msg["To"] = v_email
-                    msg["Subject"] = subject
-                    msg.attach(MIMEText(body, "plain"))
-
-                    server = smtplib.SMTP("smtp.gmail.com", 587)
-                    server.starttls()
-                    server.login(
-                        st.secrets["email_config"].get("smtp_user", ""),
-                        st.secrets["email_config"].get("smtp_password", "")
-                    )
-                    server.sendmail(st.secrets["email_config"].get("smtp_user", ""), v_email, msg.as_string())
-                    server.quit()
-                    reminded_count += 1
-                except Exception as e:
-                    st.warning(f"Gagal mengirim reminder ke {v_email}: {e}")
-
-    return reminded_count
+    pending = {}
+    for a in rows:
+        rnd = a.get("current_round") or 1
+        if (a["id"], rnd) in done:
+            continue
+        prof = a.get("profiles") or {}
+        info = pending.setdefault(a["vendor_id"], {
+            "name": prof.get("vendor_name", "Vendor"),
+            "emails": [clean(e).lower() for e in str(prof.get("email") or "").split(";") if clean(e)],
+            "deadline": a.get("deadline"),
+            "round": rnd,
+            "n_items": 0,
+        })
+        info["n_items"] += 1
+    return pending
 
 
+def send_pending_reminders(pr_info, pending, vendor_ids):
+    """Kirim 1 email per vendor (bukan per item). Return (list_terkirim, list_error)."""
+    if "email_config" not in st.secrets:
+        return [], ["Konfigurasi 'email_config' tidak ditemukan di st.secrets"]
+    sender = st.secrets["email_config"].get("smtp_user", "")
+    pwd = st.secrets["email_config"].get("smtp_password", "")
+    rfq_title = pr_info.get("rfq_title") or pr_info["pr_code"]
+
+    sent, errors = [], []
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender, pwd)
+    except Exception as e:
+        return [], [f"Gagal login SMTP: {e}"]
+
+    try:
+        for vid in vendor_ids:
+            info = pending.get(vid)
+            if not info or not info["emails"]:
+                errors.append(f"{(info or {}).get('name', vid)}: email kosong")
+                continue
+            jenis = "Final Quotation (Nego)" if info["round"] > 1 else "penawaran"
+            body = (
+                f"Dear {info['name']},\n\n"
+                f"Ini pengingat bahwa Anda belum mengirimkan {jenis} untuk RFQ berikut:\n\n"
+                f"Judul RFQ: {rfq_title}\n"
+                f"Jumlah item: {info['n_items']}\n"
+                f"Batas Waktu: {info['deadline'] or '-'}\n\n"
+                f"Silakan login & submit di portal: https://taco-rfq.streamlit.app/\n\n"
+                f"Abaikan email ini jika Anda sudah mengirim.\n\n"
+                f"Salam,\nTACO Procurement Team"
+            )
+            try:
+                msg = MIMEMultipart()
+                msg["From"] = sender
+                msg["To"] = ", ".join(info["emails"])
+                msg["Subject"] = f"⏰ REMINDER RFQ - TACO - {rfq_title}"
+                msg.attach(MIMEText(body, "plain"))
+                server.sendmail(sender, info["emails"], msg.as_string())
+                sent.append(info["name"])
+            except Exception as e:
+                errors.append(f"{info['name']}: {e}")
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+    return sent, errors
+
+
+def render_pending_reminder_box(pr_info):
+    pending = get_pending_vendors(pr_info["id"])
+    if not pending:
+        return
+    with st.container(border=True):
+        st.markdown("##### ⏳ Vendor Belum Submit Penawaran")
+        for info in pending.values():
+            tag = " (🤝 final quotation nego)" if info["round"] > 1 else ""
+            st.caption(f"• **{info['name']}** — {info['n_items']} item, deadline {info['deadline'] or '-'}{tag}")
+
+        chosen = st.multiselect(
+            "Kirim reminder ke:",
+            options=list(pending.keys()),
+            default=list(pending.keys()),
+            format_func=lambda vid: pending[vid]["name"],
+        )
+        if st.button("🔔 Send Reminder", use_container_width=True,
+                     key=f"send_remind_{pr_info['id']}", disabled=not chosen):
+            with st.spinner("Mengirim reminder..."):
+                sent, errs = send_pending_reminders(pr_info, pending, chosen)
+            if sent:
+                st.success(f"✅ Reminder terkirim ke: {', '.join(sent)}")
+            for e in errs:
+                st.warning(f"⚠️ {e}")
 # =====================================================================
 # UI: PROC - AI COST ESTIMATOR (HARGA KOMODITAS + BREAKDOWN OE)
 # =====================================================================
@@ -3678,18 +3730,24 @@ def proc_portal_manual_input():
 
     manual_key = f"manual_{pr_id}_{sel_vendor_id}"
 
+    _prev_q = [q for a in assignments for q in (a.get("quotes") or [])]
+    _prev_q.sort(key=lambda q: q.get("round") or 1)
+    prev_ref = next((q["vendor_ref_no"] for q in reversed(_prev_q)
+                     if q.get("vendor_ref_no") and q["vendor_ref_no"] != "-"), "")
+    prev_validity = next((q["validity_period"] for q in reversed(_prev_q)
+                          if q.get("validity_period") and q["validity_period"] != "-"), "")
+
     c_ref1, c_ref2 = st.columns(2)
     vendor_ref_no_val = clean(c_ref1.text_input(
-        "🔖 Nomor SPH Vendor (Wajib)",
+        "🔖 Nomor SPH Vendor (Wajib)", value=prev_ref,
         key=f"vendor_ref_{manual_key}",
         help="Nomor SPH vendor. Kalau tidak ada nomor, tulis tanggal SPH-nya.",
     ))
     validity_period_val = clean(c_ref2.text_input(
-        "📅 Masa Berlaku Penawaran",
+        "📅 Masa Berlaku Penawaran", value=prev_validity,
         key=f"validity_{manual_key}",
         placeholder="Contoh: 30 hari / s.d. 31 Des 2026",
     ))
-
     st.markdown("##### 📎 Upload PDF Quotation Vendor (Opsional — isi tabel otomatis)")
     ocr_pdf = st.file_uploader("Upload PDF penawaran vendor", type=["pdf"], key=f"ocr_pdf_{manual_key}")
     if ocr_pdf is not None and st.button("🔍 Read", key=f"ocr_btn_{manual_key}"):
@@ -4087,6 +4145,56 @@ def admin_portal_reset_password():
                 else:
                     st.error(f"❌ Gagal: {err}")
 
+def _group_is_submitted(group):
+    """Submitted = SEMUA item sudah punya quote di ronde saat ini.
+    Kalau PIC minta nego (ronde naik), otomatis balik ke tab 'Belum Submit'."""
+    cur = max((a.get("current_round") or 1) for a in group["rows"])
+    for a in group["rows"]:
+        rounds = [(q.get("round") or 1) for q in (a.get("quotes") or [])]
+        if cur not in rounds:
+            return False
+    return True
+
+
+def _render_vendor_rfq_cards(groups, tab_tag, v_search):
+    shown = 0
+    for pr_id, group in groups.items():
+        prio_tag = "🚨 URGENT" if "URGENT" in group["prio"].upper() else "📦 NORMAL"
+        item_texts = [
+            f"{(a.get('pr_items') or {}).get('description', '')} {(a.get('pr_items') or {}).get('description2', '')}"
+            for a in group["rows"]
+        ]
+        haystack = " ".join([group["title"], group["location"], group["pic_name"], group["pr_code"]] + item_texts).lower()
+        if v_search and v_search not in haystack:
+            continue
+        shown += 1
+
+        cur = max((a.get("current_round") or 1) for a in group["rows"])
+        any_quote = any(a.get("quotes") for a in group["rows"])
+        if _group_is_submitted(group):
+            badge = " | ✅ Sudah Submit"
+        elif cur > 1:
+            badge = f" | 🤝 Ronde Nego ke-{cur} (perlu final quotation)"
+        elif any_quote:
+            badge = " | 🔶 Submit Sebagian"
+        else:
+            badge = ""
+
+        with st.container(border=True):
+            c_info, c_btn = st.columns([4, 1])
+            with c_info:
+                st.subheader(f"📋 {group['title']}")
+                st.caption(
+                    f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} "
+                    f"| **Priority:** {prio_tag} | **PR Code:** {group['pr_code']}{badge}"
+                )
+            with c_btn:
+                st.write(" ")
+                if st.button("🔍 Buka Detail", key=f"v_detail_{tab_tag}_{pr_id}", type="primary", use_container_width=True):
+                    st.session_state["active_vendor_rfq_id"] = pr_id
+                    st.session_state["_scroll_top"] = True
+                    st.rerun()
+    return shown
 
 # =====================================================================
 # UI: VENDOR PORTAL
@@ -4226,14 +4334,23 @@ def vendor_portal(vendor_id):
             if attachments:
                 st.markdown("**📎 File Referensi Lampiran:** " + ", ".join(f"`{a['file_name']}`" for a in attachments))
 
+            _prev_q = [q for a in group["rows"] for q in (a.get("quotes") or [])]
+            _prev_q.sort(key=lambda q: q.get("round") or 1)
+            prev_ref = next((q["vendor_ref_no"] for q in reversed(_prev_q)
+                             if q.get("vendor_ref_no") and q["vendor_ref_no"] != "-"), "")
+            prev_validity = next((q["validity_period"] for q in reversed(_prev_q)
+                                  if q.get("validity_period") and q["validity_period"] != "-"), "")
+
             c_ref1, c_ref2 = st.columns(2)
             vendor_ref_no_val = clean(c_ref1.text_input(
-                "🔖 Nomor SPH Anda (Wajib)",
+                "🔖 Nomor SPH / Tanggal SPH (Wajib)",
+                value=prev_ref,
                 key=f"vendor_ref_{active_rfq_id}",
                 help="Isi nomor SPH (Surat Penawaran Harga) Anda. Kalau tidak ada nomor, tulis tanggal SPH-nya.",
             ))
             validity_period_val = clean(c_ref2.text_input(
                 "📅 Masa Berlaku Penawaran",
+                value=prev_validity,
                 key=f"validity_{active_rfq_id}",
                 placeholder="Contoh: 30 hari / s.d. 31 Des 2026",
             ))
@@ -4404,63 +4521,39 @@ def vendor_portal(vendor_id):
                     if all_ok:
                         if official_doc is not None:
                             upload_vendor_document(active_rfq_id, vendor_id, official_doc, round_num=current_round)
-                        st.success("🎉 Penawaran berhasil dikirim!")
+                        st.session_state["_vendor_flash"] = f"🎉 Penawaran untuk '{group['title']}' berhasil dikirim!"
+                        st.toast("Penawaran berhasil dikirim!", icon="✅")
                         st.session_state["active_vendor_rfq_id"] = None
                         st.rerun()
 
         else:
             st.header("📋 List RFQ Aktif")
-            st.write("Klik **Buka Detail** untuk mengisi penawaran harga:")
-
+        
+            flash = st.session_state.pop("_vendor_flash", None)
+            if flash:
+                st.success(flash)
+        
+            st.write("Klik **Buka Detail** untuk mengisi / merevisi penawaran harga:")
             v_search = clean(st.text_input("🔍 Cari Judul RFQ / Lokasi / PIC / Item...")).lower()
-
             st.markdown("---")
-
-            shown_count = 0
-            for pr_id, group in pr_groups.items():
-                prio_tag = "🚨 URGENT" if "URGENT" in group["prio"].upper() else "📦 NORMAL"
-
-                item_texts = []
-                for a in group["rows"]:
-                    it = a.get("pr_items") or {}
-                    item_texts.append(f"{it.get('description', '')} {it.get('description2', '')}")
-                haystack = " ".join(
-                    [group["title"], group["location"], group["pic_name"], group["pr_code"]] + item_texts
-                ).lower()
-                if v_search and v_search not in haystack:
-                    continue
-                shown_count += 1
-
-                total_rows = len(group["rows"])
-                submitted_rows = sum(1 for a in group["rows"] if a.get("quotes"))
-
-                if total_rows == 0 or submitted_rows == 0:
-                    status_badge = ""
-                elif submitted_rows < total_rows:
-                    status_badge = " | 🔶 Submit Sebagian"
-                else:
-                    status_badge = " | ✅ Sudah Submit"
-
-                with st.container(border=True):
-                    c_info, c_btn = st.columns([4, 1])
-
-                    with c_info:
-                        st.subheader(f"📋 {group['title']}")
-                        st.caption(
-                            f"👤 **PIC Procurement:** {group['pic_name']} | 📍 **Lokasi:** {group['location']} "
-                            f"| **Priority:** {prio_tag} | **PR Code:** {group['pr_code']}{status_badge}"
-                        )
-
-                    with c_btn:
-                        st.write(" ")
-                        if st.button("🔍 Buka Detail", key=f"v_detail_{pr_id}", type="primary", use_container_width=True):
-                            st.session_state["active_vendor_rfq_id"] = pr_id
-                            st.session_state["_scroll_top"] = True
-                            st.rerun()
-
-            if v_search and shown_count == 0:
-                st.info("Tidak ada RFQ yang cocok dengan pencarian.")
-
+        
+            pending_groups = {k: g for k, g in pr_groups.items() if not _group_is_submitted(g)}
+            done_groups = {k: g for k, g in pr_groups.items() if _group_is_submitted(g)}
+        
+            tab_pending, tab_done = st.tabs([
+                f"⏳ Belum Submit ({len(pending_groups)})",
+                f"✅ Sudah Submit ({len(done_groups)})",
+            ])
+            with tab_pending:
+                if not pending_groups:
+                    st.info("Semua RFQ sudah Anda submit 🎉")
+                elif _render_vendor_rfq_cards(pending_groups, "pending", v_search) == 0:
+                    st.info("Tidak ada RFQ yang cocok dengan pencarian.")
+            with tab_done:
+                if not done_groups:
+                    st.info("Belum ada RFQ yang disubmit.")
+                elif _render_vendor_rfq_cards(done_groups, "done", v_search) == 0:
+                    st.info("Tidak ada RFQ yang cocok dengan pencarian.")
     # -----------------------------------------------------------------
     # MENU 3: HISTORY PENAWARAN -- dibagi 2 tab: Menang / Kalah
     # -----------------------------------------------------------------
