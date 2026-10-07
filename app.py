@@ -680,12 +680,9 @@ DEFAULT_AWARDING_EMAIL_TEMPLATE = """Dear Tim {vendor_name},
 
 Berdasarkan hasil evaluasi untuk RFQ: {rfq_title}, perusahaan Anda dinyatakan terpilih sebagai PEMENANG TENDER.
 
-Rincian Barang & Alokasi Qty:
-{awarding_items_text}
-
 Total Nominal: Rp {total_amount}
 
-Mohon dapat mengecek lampiran Surat Perintah Kerja yang telah kami lampirkan, dan dapat segera mempersiapkan proses pengiriman.
+Mohon dapat mengecek dan menandatangani lampiran Surat Perintah Kerja yang telah kami lampirkan, dan dapat segera mempersiapkan proses pengiriman.
 
 Terima kasih atas kerja samanya.
 
@@ -1801,7 +1798,7 @@ def _confirm_close_rfq_dialog(pr_info, winner_items, losing_vendors, df_m, vendo
 def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name, cqr_pdf_bytes=None, ai_included=False):
     pr_id = pr_info["id"]
     st.markdown("##### 📜 Awarding & Final Close RFQ")
-    st.caption("Alur: **① Download CQR → ② Download SPK → ③ Upload SPK approved → ④ Close RFQ & kirim email.**")
+    st.caption("Alur: **① Download Price COmparison → ② Download SPK → ③ Upload SPK approved → ④ Close RFQ & kirim email.**")
 
     winner_items, losing_vendors = _identify_winners_and_losers(
         pivot_items, df_m, split_toggle_map, split_allocation_map, recommended_vendor_per_item
@@ -1811,14 +1808,14 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
 
 
     # ① Download CQR
-    st.markdown("**① Download CQR**")
+    st.markdown("**① Download Price Comparison**")
     if cqr_pdf_bytes:
         if ai_included:
-            st.caption("✅ AI Insight ikut tercetak di PDF CQR.")
+            st.caption("✅ AI Insight ikut tercetak di PDF Price Comparison.")
         else:
             st.caption("ℹ️ AI Insight belum di-generate — klik 🤖 Asisten AI → Generate Insight dulu kalau mau ikut masuk PDF.")
         st.download_button(
-            "📄 Download CQR (PDF)", cqr_pdf_bytes, f"CQR_{pr_info.get('rfq_title') or pr_info['pr_code']}.pdf",
+            "📄 Download Price Comparison (PDF)", cqr_pdf_bytes, f"Price Comparison_{pr_info.get('rfq_title') or pr_info['pr_code']}.pdf",
             mime="application/pdf", key=f"dl_cqr_{pr_id}", use_container_width=True,
         )
     else:
@@ -2042,7 +2039,7 @@ div[data-testid="stPopoverBody"]:has(.taco-ai-body-marker) {
 
 AI_CHAT_SYSTEM = (
     "Kamu asisten Procurement & Cost Analyst TACO Group. Jawab SINGKAT, to the point, "
-    "dalam Bahasa Indonesia, berbasis angka dari data CQR yang diberikan. "
+    "dalam Bahasa Indonesia, berbasis angka dari data harga yang diberikan. "
     "Kalau data tidak cukup, bilang apa adanya, jangan mengarang."
 )
 
@@ -2203,7 +2200,7 @@ Jawab dengan tegas, profesional, berbasis angka konkret dari data di atas, serta
                     f"{'User' if m['role'] == 'user' else 'AI'}: {m['content']}" for m in history[-6:]
                 )
                 full_query = (
-                    f"Data CQR untuk RFQ {rfq_title}:\n{df_display.to_csv(index=False)}\n\n"
+                    f"Data Price Comparison untuk RFQ {rfq_title}:\n{df_display.to_csv(index=False)}\n\n"
                     f"Bobot prioritas PIC: {weights_text}\n{saving_text}\n\n"
                     + (f"Percakapan sebelumnya:\n{past}\n\n" if past else "")
                     + f"Pertanyaan User: {q}"
@@ -2318,7 +2315,7 @@ def generate_cqr_pdf(rfq_title, pr_code, location, weights, display_df, cost_sav
     body_cell_style = ParagraphStyle("TblCell", parent=normal_style, fontSize=7.5, leading=9)
 
     elements = []
-    elements.append(Paragraph("Competitive Quotation Record (CQR)", title_style))
+    elements.append(Paragraph("Price Comparison", title_style))
     elements.append(Paragraph(f"<b>{rfq_title}</b>", normal_style))
     elements.append(Paragraph(
         f"PR Code: {pr_code} | Lokasi: {location} | Tanggal: {datetime.now().strftime('%d %b %Y')}", normal_style
@@ -3201,7 +3198,7 @@ def render_comparison_detail(pr_info):
                     styles[i] = "background-color: #d1fae5; font-weight: 600;"
         return styles
 
-    st.markdown("##### 📋 Competitive Quotation Record (CQR)")
+    st.markdown("##### 📋 Price Comparison")
     st.dataframe(
         display_df.style.apply(highlight_recommended_cells, axis=1),
         hide_index=True,
