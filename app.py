@@ -933,6 +933,46 @@ def get_vendor_documents(pr_id, vendor_id=None):
     res = q.execute()
     return res.data
 
+def save_quote_extras(pr_id, vendor_id, round_num, df):
+    """Overwrite semua komponen tambahan vendor ini untuk RFQ + ronde ini."""
+    def _n(v, d):
+        try:
+            x = float(v)
+            return d if pd.isna(x) else x
+        except (TypeError, ValueError):
+            return d
+    try:
+        sb.table("quote_extras").delete()\
+            .eq("pr_id", str(pr_id)).eq("vendor_id", str(vendor_id)).eq("round", round_num).execute()
+        rows = []
+        for _, r in df.iterrows():
+            nama = clean(r.get("Nama Komponen"))
+            if not nama:
+                continue
+            rows.append({
+                "pr_id": str(pr_id), "vendor_id": str(vendor_id), "round": round_num,
+                "nama": nama,
+                "qty": _n(r.get("Qty"), 1),
+                "uom": clean(r.get("UOM")) or "Lot",
+                "unit_price": _n(r.get("Harga Satuan (IDR)"), 0),
+                "keterangan": clean(r.get("Keterangan")) or "-",
+            })
+        if rows:
+            sb.table("quote_extras").insert(rows).execute()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def get_quote_extras(pr_id, vendor_id=None):
+    """List komponen tambahan (semua ronde). Filter ronde dilakukan di pemanggil."""
+    try:
+        q = sb.table("quote_extras").select("*").eq("pr_id", str(pr_id))
+        if vendor_id:
+            q = q.eq("vendor_id", str(vendor_id))
+        return q.execute().data or []
+    except Exception:
+        return []
 
 def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, ready_stock, warranty="-", spec_vendor="-", round_num=1, vendor_ref_no=None, validity_period=None, tax_type=None):
     try:
@@ -1442,6 +1482,13 @@ def build_items_subdoc(doc, items, total_amount):
     aligns = [WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.CENTER,
               WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT, WD_ALIGN_PARAGRAPH.RIGHT]
     for it in items:
+        if it.get("sep"):                                   # baris pembatas
+            srow = table.add_row()
+            srow._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+            smerged = srow.cells[0].merge(srow.cells[5])
+            fmt(smerged, it["sep"], bold=True, align=WD_ALIGN_PARAGRAPH.LEFT)
+            shade(smerged, "FCE4D6")
+            continue
         row = table.add_row()
         row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
         vals = [it["no"], it["barang"], it["qty"], it["uom"], it["unit_price"], it["total"]]
@@ -1460,6 +1507,8 @@ def build_items_subdoc(doc, items, total_amount):
     for gc, w in zip(table._tbl.tblGrid.findall(qn("w:gridCol")), widths):
         gc.set(qn("w:w"), str(int(w.twips)))
     for row in table.rows:
+        if len({c._tc for c in row.cells}) == 1:   # baris yang digabung penuh (pembatas)
+            continue
         for idx, w in enumerate(widths):
             if idx < len(row.cells):
                 row.cells[idx].width = w
@@ -1752,17 +1801,19 @@ def build_spk_context(pr_info, v_name, vendor_id, items, df_m):
     def _rp(n):
         return f"{float(n):,.0f}".replace(",", ".")
 
-    items_table = [
-        {
-            "no": i,
-            "barang": it["barang"],
-            "qty": _fmt_qty(it["qty"]),
-            "uom": it["uom"],
-            "unit_price": _rp(it["unit_price"]),
-            "total": _rp(it["total"]),
+    pr_items_only = [it for it in items if not it.get("is_extra")]
+    extra_items_only = [it for it in items if it.get("is_extra")]
+
+    def _row(i, it):
+        return {
+            "no": i, "barang": it["barang"], "qty": _fmt_qty(it["qty"]), "uom": it["uom"],
+            "unit_price": _rp(it["unit_price"]), "total": _rp(it["total"]),
         }
-        for i, it in enumerate(items, start=1)
-    ]    
+
+    items_table = [_row(i, it) for i, it in enumerate(pr_items_only, start=1)]
+    if extra_items_only:
+        items_table.append({"sep": "Biaya / Komponen Tambahan"})      # baris pembatas
+        items_table += [_row(i, it) for i, it in enumerate(extra_items_only, start=1)]   
     context = {
         "rfq_title": pr_info.get("rfq_title") or pr_info["pr_code"],
         "pr_number": pr_info["pr_code"],
@@ -1886,7 +1937,27 @@ def _confirm_close_rfq_dialog(pr_info, winner_items, losing_vendors, df_m, vendo
     if c2.button("❌ Batal", use_container_width=True):
         st.rerun()
 
-
+def attach_extras_to_winners(pr_id, winner_items, vendor_id_to_name):
+    """Tambahkan komponen tambahan (ronde terbaru) ke daftar item vendor pemenang."""
+    name_to_id = {v: k for k, v in vendor_id_to_name.items()}
+    for v_name, items in winner_items.items():
+        vid = name_to_id.get(v_name)
+        if not vid:
+            continue
+        ex = get_quote_extras(pr_id, vid)
+        if not ex:
+            continue
+        latest = max(e["round"] for e in ex)
+        for e in ex:
+            if e["round"] != latest:
+                continue
+            qty, up = float(e["qty"]), float(e["unit_price"])
+            items.append({
+                "barang": e["nama"], "qty": qty, "uom": e["uom"],
+                "unit_price": up, "total": qty * up, "is_extra": True,
+            })
+    return winner_items
+    
 def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name, cqr_files=None, ai_included=False):
     pr_id = pr_info["id"]
     st.markdown("##### 📜 Awarding & Final Close RFQ")
@@ -1895,6 +1966,7 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
     winner_items, losing_vendors = _identify_winners_and_losers(
         pivot_items, df_m, split_toggle_map, split_allocation_map, recommended_vendor_per_item
     )
+    winner_items = attach_extras_to_winners(pr_id, winner_items, vendor_id_to_name)
     name_to_id = {v: k for k, v in vendor_id_to_name.items()}
 
 
@@ -1983,6 +2055,9 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
 # =====================================================================
 # AI OCR: BACA PDF QUOTATION VENDOR (GEMINI VISION)
 # =====================================================================
+def ocr_row_count(extracted):
+    """Jumlah baris item hasil OCR (tanpa key khusus __extras__)."""
+    return len([k for k in (extracted or {}) if k != "__extras__"])
 def extract_quote_from_pdf(pdf_bytes, items_list):
     """Baca PDF quotation vendor pakai Gemini Vision, cocokkan ke daftar barang RFQ.
     HASIL INI DRAFT — vendor WAJIB review sebelum submit, tidak ada auto-submit."""
@@ -1999,18 +2074,25 @@ def extract_quote_from_pdf(pdf_bytes, items_list):
 
     items_text = "\n".join(f"- {it}" for it in items_list)
 
-    prompt = f"""Baca PDF quotation vendor ini DENGAN TELITI, KHUSUSNYA DI ANGKA HARGA (bisa scan/tulisan tangan). Cocokkan ke daftar barang berikut (berdasarkan kemiripan nama):
-{items_text}
+    prompt = f"""Baca PDF quotation vendor ini DENGAN TELITI, KHUSUSNYA DI ANGKA HARGA (bisa scan/tulisan tangan).
 
+BAGIAN 1 - "items": cocokkan ke daftar barang RFQ berikut (berdasarkan kemiripan nama):
+{items_text}
 Untuk tiap barang yang ditemukan, ekstrak: nama_barang_rfq (harus salah satu dari daftar di atas), unit_price (angka saja), brand, spesifikasi, lead_time_days (default 7), ready_stock ("Ya"/"Tidak"), warranty.
 
-Jawab HANYA JSON array tanpa markdown:
-[{{"nama_barang_rfq":"...","unit_price":0,"brand":"-","spesifikasi":"-","lead_time_days":7,"ready_stock":"Ya","warranty":"-"}}]
+BAGIAN 2 - "tambahan": semua baris biaya/material/jasa di quotation yang TIDAK cocok dengan daftar barang RFQ di atas
+(misal biaya mobilisasi, material tambahan, ongkos pasang, breakdown komponen). JANGAN masukkan subtotal, PPN, diskon, atau grand total.
+Untuk tiap baris: nama, qty (angka, default 1), uom (default "Lot"), unit_price (angka satuan saja), keterangan.
+Kalau tidak ada, isi [].
+
+Jawab HANYA JSON object tanpa markdown:
+{{"items":[{{"nama_barang_rfq":"...","unit_price":0,"brand":"-","spesifikasi":"-","lead_time_days":7,"ready_stock":"Ya","warranty":"-"}}],
+"tambahan":[{{"nama":"...","qty":1,"uom":"Lot","unit_price":0,"keterangan":"-"}}]}}
 """
 
     generation_config = genai.GenerationConfig(
         temperature=0,
-        max_output_tokens=2048,
+        max_output_tokens=4096,
     )
 
     def _call(model_name):
@@ -2027,11 +2109,16 @@ Jawab HANYA JSON array tanpa markdown:
         raw = (res.text or "").strip()
         raw = re.sub(r"^```json|```$", "", raw, flags=re.MULTILINE).strip()
         parsed = json.loads(raw)
+        if isinstance(parsed, list):            # jaga-jaga kalau model balas format lama
+            parsed = {"items": parsed, "tambahan": []}
         result = {}
-        for row in parsed:
+        for row in parsed.get("items", []) or []:
             key = str(row.get("nama_barang_rfq", "")).strip()
             if key:
                 result[key] = row
+        extras = parsed.get("tambahan", []) or []
+        if extras:
+            result["__extras__"] = extras
         return result, None
     except Exception as e:
         return None, str(e)
@@ -2654,7 +2741,12 @@ def build_cqr_pdf_files(rfq_title, pr_code, loc, weights, display_df, cost_savin
         won = {it["Barang"] for it in items}
 
         # 1) Ambil baris item yang dimenangkan vendor ini -- SEMUA kolom vendor tetap ada
-        sub = body_df[body_df["Barang"].isin(won)].copy().reset_index(drop=True)
+        # 1) item yang dimenangkan + komponen tambahan vendor ini
+        won_rows = body_df[body_df["Barang"].isin(won)]
+        extra_rows_v = body_df[body_df["🏆 Rekomendasi"] == f"Tambahan {v_name}"]
+        sub = pd.concat([won_rows, extra_rows_v]).copy().reset_index(drop=True)
+        _num = lambda s: float(re.sub(r"[^\d]", "", str(s)) or 0)
+        extra_v_total = sum(_num(x) for x in extra_rows_v[f"{v_name} — Total"])
 
         # 2) Kolom rekomendasi: kalau item di-split tampilkan persennya
         def _rec(barang, current):
@@ -2665,10 +2757,12 @@ def build_cqr_pdf_files(rfq_title, pr_code, loc, weights, display_df, cost_savin
         sub["🏆 Rekomendasi"] = [_rec(b, c) for b, c in zip(sub["Barang"], sub["🏆 Rekomendasi"])]
 
         # 3) GRAND TOTAL: total tiap vendor HANYA untuk item yang dimenangkan (apple to apple)
-        v_total = sum(float(it["Total"]) for it in items)
+        v_total = sum(float(it["Total"]) for it in items) + extra_v_total
         gt = {"Barang": "GRAND TOTAL", "Qty": "", "UOM": ""}
         for v in all_vendors:
             vt = df_m[(df_m["vendor"] == v) & (df_m["Barang"].isin(won))]["total"].sum()
+            if v == v_name:
+                vt += extra_v_total
             gt[f"{v}{suffix}"] = ""
             gt[f"{v} — Total"] = rp(vt) if vt else "-"
         gt["🏆 Rekomendasi"] = rp(v_total)
@@ -2677,7 +2771,7 @@ def build_cqr_pdf_files(rfq_title, pr_code, loc, weights, display_df, cost_savin
         # 4) Cost saving khusus item yang dimenangkan vendor ini
         v_worst = sum(
             float(df_m[df_m["Barang"] == it["Barang"]]["price"].max()) * float(it["Qty"]) for it in items
-        )
+        ) + extra_v_total
         v_saving = v_worst - v_total
         v_pct = (v_saving / v_worst * 100) if v_worst > 0 else 0
 
@@ -3332,10 +3426,39 @@ def render_comparison_detail(pr_info):
         display_df[f"{v} — Total"] = total_col
 
     display_df["🏆 Rekomendasi"] = display_df["Barang"].map(recommended_vendor_per_item).fillna("-")
+    # ---------- Komponen tambahan vendor: jadi baris di tabel, ikut total ----------
+    _rp = lambda n: f"Rp {float(n):,.0f}".replace(",", ".")
+    extras_all = get_quote_extras(active_id)
+    _latest = {}
+    for e in extras_all:
+        _latest[e["vendor_id"]] = max(_latest.get(e["vendor_id"], 1), e["round"])
+    extra_total_by_vendor = {}
+    extra_rows = []
+    for e in extras_all:
+        if e["round"] != _latest[e["vendor_id"]]:
+            continue
+        vn = vendor_id_to_name.get(e["vendor_id"])
+        if not vn:
+            continue
+        sub = float(e["qty"]) * float(e["unit_price"])
+        extra_total_by_vendor[vn] = extra_total_by_vendor.get(vn, 0) + sub
+        row = {"Barang": f"➕ {e['nama']}", "Qty": f"{float(e['qty']):g}", "UOM": e["uom"]}
+        for v in vendor_list_sorted:
+            row[f"{v} — Price/Unit"] = _rp(e["unit_price"]) if v == vn else "-"
+            row[f"{v} — Total"] = _rp(sub) if v == vn else "-"
+        row["🏆 Rekomendasi"] = f"Tambahan {vn}"
+        extra_rows.append(row)
+    if extra_rows:
+        display_df = pd.concat([display_df, pd.DataFrame(extra_rows)], ignore_index=True)
 
+    # tambahan vendor pemenang ikut total estimasi (worst case ditambah sama supaya saving tidak bias)
+    _winners = {v for vs in highlight_map.values() for v in vs}
+    _extra_win = sum(extra_total_by_vendor.get(v, 0) for v in _winners)
+    recommended_total += _extra_win
+    worst_case_total += _extra_win
     grand_total_row = {"Barang": "GRAND TOTAL", "Qty": "", "UOM": ""}
     for v in vendor_list_sorted:
-        vendor_total = df_m[df_m["vendor"] == v]["total"].sum()
+        vendor_total = df_m[df_m["vendor"] == v]["total"].sum() + extra_total_by_vendor.get(v, 0)
         grand_total_row[f"{v} — Price/Unit"] = ""
         grand_total_row[f"{v} — Total"] = f"Rp {vendor_total:,.0f}".replace(",", ".")
     grand_total_row["🏆 Rekomendasi"] = f"Rp {recommended_total:,.0f}".replace(",", ".")
@@ -3912,9 +4035,9 @@ def proc_portal_manual_input():
             st.session_state[f"ocr_result_{manual_key}"] = extracted
             doc_saved = upload_vendor_document(pr_id, sel_vendor_id, ocr_pdf, round_num=current_round)
             if doc_saved:
-                st.success(f"✅ {len(extracted)} baris berhasil dibaca & file otomatis tersimpan sebagai dokumen resmi.")
+                st.success(f"✅ {ocr_row_count(extracted)} baris berhasil dibaca & file otomatis tersimpan sebagai dokumen resmi.")
             else:
-                st.success(f"✅ {len(extracted)} baris berhasil dibaca.")
+                st.success(f"✅ {ocr_row_count(extracted)} baris berhasil dibaca.")
             st.rerun()
         else:
             st.warning("AI tidak menemukan data yang cocok di PDF ini.")
@@ -4443,7 +4566,7 @@ PANDUAN PORTAL
 - Franco = vendor kirim ke lokasi TACO. Loco = TACO ambil sendiri. Langsung = kirim sekaligus. Partial = boleh bertahap.
 """
 
-
+@st.fragment
 def render_vendor_ai_chat(group, pr_id, alamat_kirim, current_round):
     """Chatbot floating untuk vendor. Konteks HANYA berisi data RFQ milik vendor ini."""
     if "gemini" not in st.secrets or not st.secrets["gemini"].get("api_key"):
@@ -4714,11 +4837,11 @@ def vendor_portal(vendor_id):
                     doc_saved = upload_vendor_document(active_rfq_id, vendor_id, ocr_pdf, round_num=current_round)
                     if doc_saved:
                         st.success(
-                            f"✅ {len(extracted)} baris berhasil dibaca & file otomatis tersimpan sebagai dokumen resmi. "
+                            f"✅ {ocr_row_count(extracted)} baris berhasil dibaca & file otomatis tersimpan sebagai dokumen resmi. "
                             "Cek & koreksi di tabel di bawah sebelum kirim."
                         )
                     else:
-                        st.success(f"✅ {len(extracted)} baris berhasil dibaca. Cek & koreksi di tabel di bawah sebelum kirim.")
+                        st.success(f"✅ {ocr_row_count(extracted)} baris berhasil dibaca. Cek & koreksi di tabel di bawah sebelum kirim.")
                     st.rerun()
                 else:
                     st.warning("AI tidak menemukan data yang cocok di PDF ini.")
@@ -4729,7 +4852,17 @@ def vendor_portal(vendor_id):
                     "⚠️ Sebagian data di bawah adalah hasil bacaan dari PDF — **wajib dicek ulang**, "
                 )
 
+            ocr_extras = ocr_result.get("__extras__", []) if ocr_result else []
+
+            def _f(v, d=0.0):
+                try:
+                    x = float(v)
+                    return d if pd.isna(x) else x
+                except (TypeError, ValueError):
+                    return d
+
             table_rows = []
+            ass_map = {}
             for a in group["rows"]:
                 item = a.get("pr_items") or {}
 
@@ -4744,8 +4877,11 @@ def vendor_portal(vendor_id):
 
                 ocr_row = ocr_result.get(clean_item_name)
 
+                rk = f"pr{len(table_rows)}"
+                ass_map[rk] = a["id"]
                 table_rows.append({
-                    "assignment_id": a["id"],
+                    "row_key": rk,
+                    "Tipe": "Item PR",
                     "Barang": clean_item_name,
                     "Spesifikasi": (ocr_row.get("spesifikasi") if ocr_row else None) or last_quote.get("spec_vendor", "-"),
                     "Qty": item.get("quantity", 0),
@@ -4757,11 +4893,39 @@ def vendor_portal(vendor_id):
                     "Warranty": (ocr_row.get("warranty") if ocr_row else None) or last_quote.get("warranty", "-"),
                 })
 
+            # ---- baris tambahan: dari OCR kalau ada, kalau tidak dari data tersimpan ----
+            if ocr_extras:
+                extra_src = [
+                    {"nama": x.get("nama"), "qty": _f(x.get("qty"), 1) or 1, "uom": x.get("uom") or "Lot",
+                     "unit_price": _f(x.get("unit_price")), "keterangan": x.get("keterangan") or "-"}
+                    for x in ocr_extras if clean(x.get("nama"))
+                ]
+            else:
+                _ex_all = get_quote_extras(active_rfq_id, vendor_id)
+                _rounds = [e["round"] for e in _ex_all]
+                _use = current_round if current_round in _rounds else (max(_rounds) if _rounds else None)
+                extra_src = [
+                    {"nama": e["nama"], "qty": e["qty"], "uom": e["uom"],
+                     "unit_price": e["unit_price"], "keterangan": e["keterangan"]}
+                    for e in _ex_all if e["round"] == _use
+                ]
+            for x in extra_src:
+                table_rows.append({
+                    "row_key": None,
+                    "Tipe": "➕ Tambahan",
+                    "Barang": x["nama"],
+                    "Spesifikasi": x["keterangan"],
+                    "Qty": x["qty"],
+                    "UOM": x["uom"],
+                    "Unit Price (IDR)": x["unit_price"],
+                    "Brand": "-", "Ready Stock": "Ya", "Lead Time (Hari)": None, "Warranty": "-",
+                })
+
             df_preview = pd.DataFrame(table_rows)
 
             excel_buf = io.BytesIO()
             with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
-                df_preview.drop(columns=["assignment_id"]).to_excel(writer, index=False, sheet_name="Daftar Barang")
+                df_preview.drop(columns=["row_key"]).to_excel(writer, index=False, sheet_name="Daftar Barang")
             st.download_button(
                 "📥 Download Daftar Barang (Excel)",
                 excel_buf.getvalue(),
@@ -4770,38 +4934,48 @@ def vendor_portal(vendor_id):
             )
 
             st.caption("Text dapat di copy-paste dari excel (khusus angka mohon copy tanpa format)")
+            st.caption(
+                "Item PR sudah terisi. Kalau ada biaya/material tambahan di luar daftar, klik baris kosong paling bawah "
+                "untuk menambah (isi Barang, Qty, UOM, Harga). Baris ➕ hasil bacaan PDF juga muncul di sini."
+            )
 
             edited = st.data_editor(
-                df_preview.drop(columns=["assignment_id"]),
-                key=f"editor_v_{active_rfq_id}",
+                df_preview,
+                key=f"editor_v_{active_rfq_id}_{len(ocr_result)}_{len(extra_src)}",
+                num_rows="dynamic",
                 hide_index=True,
                 use_container_width=True,
                 row_height=80,
-                disabled=["Barang", "Qty", "UOM"],
+                disabled=["Tipe"],
                 column_config={
-                    "Barang": st.column_config.TextColumn(
-                        "Barang",
-                        width=280,
-                        help="Nama Barang & Deskripsi Utama"
-                    ),
-                    "Spesifikasi": st.column_config.TextColumn(
-                        "Spesifikasi",
-                        width="medium",
-                        help="Tuliskan spesifikasi detail merk/tipe barang yang Anda tawarkan"
-                    ),
-                    "Qty": st.column_config.NumberColumn("Qty", width="small"),
+                    "row_key": None,
+                    "Tipe": st.column_config.TextColumn("Tipe", width="small"),
+                    "Barang": st.column_config.TextColumn("Barang / Komponen", width=280),
+                    "Spesifikasi": st.column_config.TextColumn("Spesifikasi / Keterangan", width="medium"),
+                    "Qty": st.column_config.NumberColumn("Qty", width="small", min_value=0),
                     "UOM": st.column_config.TextColumn("UOM", width="small"),
-                    "Unit Price (IDR)": st.column_config.NumberColumn(
-                        "Unit Price (IDR)",
-                        format="Rp %,d",
-                        min_value=0,
-                        step=1000,
-                    ),
-                    "Ready Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=True),
+                    "Unit Price (IDR)": st.column_config.NumberColumn("Unit Price (IDR)", format="Rp %,d", min_value=0, step=1000),
+                    "Brand": st.column_config.TextColumn("Brand"),
+                    "Ready Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=False),
                     "Lead Time (Hari)": st.column_config.NumberColumn("Lead Time (Hari)", min_value=1, step=1),
                     "Warranty": st.column_config.TextColumn("Warranty", width="small", help="Contoh: 1 Tahun, 6 Bulan, atau '-' kalau tidak ada"),
                 },
             )
+
+            # ---- pisahkan item PR vs tambahan ----
+            is_pr = edited["row_key"].isin(list(ass_map))
+            pr_edit = edited[is_pr].copy()
+            orig_qty = df_preview.set_index("row_key")["Qty"]
+            pr_edit["Qty"] = pr_edit["row_key"].map(orig_qty)          # qty item PR tetap dari PR
+            extra_edit = edited[~is_pr & edited["Barang"].fillna("").astype(str).str.strip().ne("")]
+
+            # ---- total live ----
+            _tot = lambda df: float((df["Unit Price (IDR)"].fillna(0).astype(float) * df["Qty"].fillna(0).astype(float)).sum())
+            base_total, extra_total = _tot(pr_edit), _tot(extra_edit)
+            t1, t2, t3 = st.columns(3)
+            t1.metric("Total Item PR", f"Rp {base_total:,.0f}".replace(",", "."))
+            t2.metric("Total Tambahan", f"Rp {extra_total:,.0f}".replace(",", "."))
+            t3.metric("Grand Total", f"Rp {base_total + extra_total:,.0f}".replace(",", "."))
             all_q = [q for a in group["rows"] for q in (a.get("quotes") or [])]
             all_q.sort(key=lambda q: q.get("round") or 1)
             prev_tax = next((q["tax_type"] for q in reversed(all_q) if q.get("tax_type")), None)
@@ -4839,30 +5013,41 @@ def vendor_portal(vendor_id):
                     st.error("❌ Mohon pilih Include / Exclude PPN dulu sebelum mengirim penawaran.")
                 elif not has_doc:
                     st.error("❌ Mohon upload PDF quotation resmi (kop surat/tandatangan) dulu sebelum mengirim penawaran.")
-                else:
-                    all_ok = True
-                    for idx, r in edited.iterrows():
-                        ass_id = df_preview.iloc[idx]["assignment_id"]
-                        ok, err = submit_quote(
-                            ass_id, vendor_id,
-                            r["Unit Price (IDR)"], r["Brand"], r["Lead Time (Hari)"],
-                            r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
-                            round_num=current_round, vendor_ref_no=vendor_ref_no_val,
-                            validity_period=validity_period_val,
-                            tax_type=tax_val,
-                        )
+                                else:
+                    if set(pr_edit["row_key"]) != set(ass_map):
+                        st.error("❌ Baris Item PR tidak boleh dihapus. Kalau tidak menawar item tertentu, isi harga 0 atau hubungi PIC.")
+                    else:
+                        all_ok = True
+                        for _, r in pr_edit.iterrows():
+                            ok, err = submit_quote(
+                                ass_map[r["row_key"]], vendor_id,
+                                _f(r["Unit Price (IDR)"]), r["Brand"], int(_f(r["Lead Time (Hari)"], 7)),
+                                r["Ready Stock"], r["Warranty"], r["Spesifikasi"],
+                                round_num=current_round, vendor_ref_no=vendor_ref_no_val,
+                                validity_period=validity_period_val,
+                                tax_type=tax_val,
+                            )
+                            if not ok:
+                                all_ok = False
+                                st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
 
-                        if not ok:
-                            all_ok = False
-                            st.error(f"❌ Gagal menyimpan baris '{r['Barang']}': {err}")
-
-                    if all_ok:
-                        if official_doc is not None:
-                            upload_vendor_document(active_rfq_id, vendor_id, official_doc, round_num=current_round)
-                        st.session_state["_vendor_flash"] = f"🎉 Penawaran untuk '{group['title']}' berhasil dikirim!"
-                        st.toast("Penawaran berhasil dikirim!", icon="✅")
-                        st.session_state["active_vendor_rfq_id"] = None
-                        st.rerun()
+                        if all_ok:
+                            extras_df = pd.DataFrame({
+                                "Nama Komponen": extra_edit["Barang"],
+                                "Qty": extra_edit["Qty"],
+                                "UOM": extra_edit["UOM"],
+                                "Harga Satuan (IDR)": extra_edit["Unit Price (IDR)"],
+                                "Keterangan": extra_edit["Spesifikasi"],
+                            })
+                            ok_ex, err_ex = save_quote_extras(active_rfq_id, vendor_id, current_round, extras_df)
+                            if not ok_ex:
+                                st.warning(f"⚠️ Penawaran tersimpan, tapi komponen tambahan gagal disimpan: {err_ex}")
+                            if official_doc is not None:
+                                upload_vendor_document(active_rfq_id, vendor_id, official_doc, round_num=current_round)
+                            st.session_state["_vendor_flash"] = f"🎉 Penawaran untuk '{group['title']}' berhasil dikirim!"
+                            st.toast("Penawaran berhasil dikirim!", icon="✅")
+                            st.session_state["active_vendor_rfq_id"] = None
+                            st.rerun()
 
         else:
             st.header("📋 List RFQ Aktif")
