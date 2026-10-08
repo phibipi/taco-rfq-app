@@ -4939,20 +4939,32 @@ def vendor_portal(vendor_id):
                 "untuk menambah (isi Barang, Qty, UOM, Harga). Baris ➕ hasil bacaan PDF juga muncul di sini."
             )
 
-            edited = st.data_editor(
-                df_preview,
-                key=f"editor_v_{active_rfq_id}_{len(ocr_result)}_{len(extra_src)}",
-                num_rows="dynamic",
+            # ---- pisahkan data awal: item PR vs tambahan ----
+            df_pr_part = df_preview[df_preview["row_key"].notna()].reset_index(drop=True)
+            extra_cols = ["Barang", "Spesifikasi", "Qty", "UOM", "Unit Price (IDR)"]
+            df_extra_part = (
+                df_preview[df_preview["row_key"].isna()][extra_cols].reset_index(drop=True)
+                if len(df_preview) > len(df_pr_part)
+                else pd.DataFrame(columns=extra_cols)
+            )
+
+            editor_suffix = f"{active_rfq_id}_{len(ocr_result)}_{len(extra_src)}"
+
+            st.markdown("**Item PR** (baris tidak bisa dihapus)")
+            pr_edit = st.data_editor(
+                df_pr_part,
+                key=f"editor_v_pr_{editor_suffix}",
+                num_rows="fixed",
                 hide_index=True,
                 use_container_width=True,
                 row_height=80,
-                disabled=["Tipe"],
+                disabled=["Tipe", "Barang", "Qty", "UOM"],
                 column_config={
                     "row_key": None,
                     "Tipe": st.column_config.TextColumn("Tipe", width="small"),
-                    "Barang": st.column_config.TextColumn("Barang / Komponen", width=280),
-                    "Spesifikasi": st.column_config.TextColumn("Spesifikasi / Keterangan", width="medium"),
-                    "Qty": st.column_config.NumberColumn("Qty", width="small", min_value=0),
+                    "Barang": st.column_config.TextColumn("Barang", width=280),
+                    "Spesifikasi": st.column_config.TextColumn("Spesifikasi", width="medium"),
+                    "Qty": st.column_config.NumberColumn("Qty", width="small"),
                     "UOM": st.column_config.TextColumn("UOM", width="small"),
                     "Unit Price (IDR)": st.column_config.NumberColumn("Unit Price (IDR)", format="Rp %,d", min_value=0, step=1000),
                     "Brand": st.column_config.TextColumn("Brand"),
@@ -4962,12 +4974,22 @@ def vendor_portal(vendor_id):
                 },
             )
 
-            # ---- pisahkan item PR vs tambahan ----
-            is_pr = edited["row_key"].isin(list(ass_map))
-            pr_edit = edited[is_pr].copy()
-            orig_qty = df_preview.set_index("row_key")["Qty"]
-            pr_edit["Qty"] = pr_edit["row_key"].map(orig_qty)          # qty item PR tetap dari PR
-            extra_edit = edited[~is_pr & edited["Barang"].fillna("").astype(str).str.strip().ne("")]
+            st.markdown("**➕ Biaya / Komponen Tambahan** (opsional, klik baris kosong paling bawah untuk menambah)")
+            edited_extra = st.data_editor(
+                df_extra_part,
+                key=f"editor_v_extra_{editor_suffix}",
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Barang": st.column_config.TextColumn("Barang / Komponen", width=280),
+                    "Spesifikasi": st.column_config.TextColumn("Keterangan", width="medium"),
+                    "Qty": st.column_config.NumberColumn("Qty", width="small", min_value=0),
+                    "UOM": st.column_config.TextColumn("UOM", width="small"),
+                    "Unit Price (IDR)": st.column_config.NumberColumn("Unit Price (IDR)", format="Rp %,d", min_value=0, step=1000),
+                },
+            )
+            extra_edit = edited_extra[edited_extra["Barang"].fillna("").astype(str).str.strip().ne("")]
 
             # ---- total live ----
             _tot = lambda df: float((df["Unit Price (IDR)"].fillna(0).astype(float) * df["Qty"].fillna(0).astype(float)).sum())
