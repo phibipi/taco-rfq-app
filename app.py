@@ -5013,7 +5013,7 @@ def vendor_portal(vendor_id):
                     st.error("❌ Mohon pilih Include / Exclude PPN dulu sebelum mengirim penawaran.")
                 elif not has_doc:
                     st.error("❌ Mohon upload PDF quotation resmi (kop surat/tandatangan) dulu sebelum mengirim penawaran.")
-                                else:
+                else:
                     if set(pr_edit["row_key"]) != set(ass_map):
                         st.error("❌ Baris Item PR tidak boleh dihapus. Kalau tidak menawar item tertentu, isi harga 0 atau hubungi PIC.")
                     else:
