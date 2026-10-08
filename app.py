@@ -4373,8 +4373,8 @@ def vendor_portal(vendor_id):
     # -----------------------------------------------------------------
     # MENU 1: DATA SUPPLIER
     # -----------------------------------------------------------------
-    if selected_v_page == "Data Supplier":
-        st.header("⚙️ Data Supplier & Profil Vendor")
+    if selected_v_page == "Data Perusahaan":
+        st.header("⚙️ Data & Profil Vendor")
         prof = sb.table("profiles").select("*").eq("id", vendor_id).single().execute()
         p_data = prof.data or {}
 
@@ -4466,7 +4466,7 @@ def vendor_portal(vendor_id):
                     "Lengkapi dulu agar bisa mengirim penawaran."
                 )
                 if st.button("⚙️ Lengkapi Data Supplier", key=f"goto_supplier_{active_rfq_id}"):
-                    st.session_state["vendor_page"] = "Data Supplier"
+                    st.session_state["vendor_page"] = "Data Perusahaan"
                     st.session_state["active_vendor_rfq_id"] = None
                     st.rerun()
             st.divider()
