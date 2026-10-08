@@ -4360,9 +4360,14 @@ def render_rfq_terms_box(group, pr_id):
     with st.container(border=True):
         st.markdown("##### 📌 Ketentuan RFQ dari PIC")
         c1, c2, c3 = st.columns(3)
-        c1.markdown(f"**📅 Batas Waktu**  \n{deadline}")
-        c2.markdown(f"**🚚 Metode Pengiriman**  \n{delivery}")
-        c3.markdown(f"**📦 Jenis Pengiriman**  \n{shipment}")
+
+        def _show(col, label, value):
+            col.markdown(f"**{label}**")
+            col.write(value if value and value != "-" else "Belum ditentukan")
+
+        _show(c1, "📅 Batas Waktu", deadline)
+        _show(c2, "🚚 Metode Pengiriman", delivery)
+        _show(c3, "📦 Jenis Pengiriman", shipment)
 
         hints = []
         if "franco" in str(delivery).lower():
