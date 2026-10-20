@@ -766,7 +766,9 @@ Berdasarkan hasil evaluasi untuk RFQ: {rfq_title}, perusahaan Anda dinyatakan te
 
 Total Nominal: Rp {total_amount}
 
-Mohon dapat mengecek dan menandatangani lampiran Surat Perintah Kerja yang telah kami lampirkan, dan dapat segera mempersiapkan proses pengiriman.
+Terlampir pada email ini:
+1. Surat Penunjukan (Letter of Intent)
+2. Purchase Order (PO) -- mohon dicek, ditandatangani, dan dikembalikan kepada kami.
 
 Terima kasih atas kerja samanya.
 
@@ -1700,9 +1702,10 @@ def lookup_warehouse_address(location):
 
 
 # ---------------------------------------------------------------------
-# SPK APPROVED (diupload PIC, 1 file per RFQ per vendor, upload ulang = replace)
+# PO (diupload PIC, 1 file per RFQ per vendor pemenang, upload ulang = replace)
+# Tabel `spk_documents` dipakai ulang, path storage dipisah ke /po/
 # ---------------------------------------------------------------------
-def get_spk_document(pr_id, vendor_id):
+def get_po_document(pr_id, vendor_id):
     try:
         res = sb.table("spk_documents").select("*").eq("pr_id", str(pr_id)).eq("vendor_id", str(vendor_id)).execute()
         return res.data[0] if res.data else None
@@ -1710,10 +1713,10 @@ def get_spk_document(pr_id, vendor_id):
         return None
 
 
-def save_spk_approved(pr_id, vendor_id, file):
+def save_po_document(pr_id, vendor_id, file):
     try:
-        path = f"{pr_id}/spk_approved/{vendor_id}/{file.name}"
-        old = get_spk_document(pr_id, vendor_id)
+        path = f"{pr_id}/po/{vendor_id}/{file.name}"
+        old = get_po_document(pr_id, vendor_id)
         sb.storage.from_(BUCKET_NAME).upload(
             path, file.getvalue(), {"content-type": file.type or "application/pdf", "upsert": "true"}
         )
