@@ -1014,12 +1014,40 @@ def submit_quote(assignment_id, vendor_id, unit_price, brand, lead_time_days, re
         return False, str(e)
 
 
-def request_nego(pr_id, vendor_ids, note=""):
-    """Naikkan current_round assignment vendor terpilih untuk RFQ ini & kirim email minta final quotation."""
+MAX_NEGO_ROUND = 2  # nego dibatasi sampai tahap 2
+
+
+def get_nego_candidates(pr_id):
+    """Semua assignment RFQ ini + current_round + harga ronde 1 (untuk referensi PIC)."""
+    res = (
+        sb.table("rfq_assignments")
+        .select("id, vendor_id, current_round, profiles(vendor_name), "
+                "pr_items!inner(pr_id, description, description2, quantity, uom), quotes(unit_price, round)")
+        .eq("pr_items.pr_id", pr_id)
+        .execute()
+    )
+    return res.data or []
+
+
+def get_targets_map(assignment_ids, round_num):
+    """{assignment_id: {target_price, target_qty}} untuk ronde tertentu."""
+    if not assignment_ids:
+        return {}
+    try:
+        res = (sb.table("quote_targets").select("*")
+               .in_("assignment_id", list(assignment_ids)).eq("round", round_num).execute())
+        return {r["assignment_id"]: r for r in (res.data or [])}
+    except Exception:
+        return {}
+
+
+def request_nego(pr_id, vendor_ids, note="", targets=None):
+    """Naikkan ronde (maks MAX_NEGO_ROUND), simpan target price/qty kalau ada, kirim email.
+    targets: {assignment_id: {"price": float|None, "qty": float|None}} atau None (= Open Quote)."""
     try:
         res_ass = (
             sb.table("rfq_assignments")
-            .select("id, vendor_id, current_round, profiles(vendor_name, email), pr_items!inner(pr_id, description, description2)")
+            .select("id, vendor_id, current_round, profiles(vendor_name, email), pr_items!inner(pr_id)")
             .eq("pr_items.pr_id", pr_id)
             .in_("vendor_id", vendor_ids)
             .execute()
@@ -1033,32 +1061,56 @@ def request_nego(pr_id, vendor_ids, note=""):
 
         notified = 0
         for v_id, rows in by_vendor.items():
-            new_round = max((r.get("current_round") or 1) for r in rows) + 1
+            cur = max((r.get("current_round") or 1) for r in rows)
+            if cur >= MAX_NEGO_ROUND:
+                continue  # sudah tahap 2, tidak boleh naik lagi
+            new_round = cur + 1
             ids = [r["id"] for r in rows]
             sb.table("rfq_assignments").update({"current_round": new_round}).in_("id", ids).execute()
+
+            has_target = False
+            if targets:
+                trows = []
+                for r in rows:
+                    t = targets.get(r["id"])
+                    if t:
+                        trows.append({
+                            "assignment_id": r["id"], "round": new_round,
+                            "target_price": t.get("price"), "target_qty": t.get("qty"),
+                        })
+                if trows:
+                    sb.table("quote_targets").upsert(trows, on_conflict="assignment_id,round").execute()
+                    has_target = True
 
             v_profile = rows[0].get("profiles") or {}
             v_email = v_profile.get("email")
             v_name = v_profile.get("vendor_name", "Vendor")
             if v_email and "email_config" in st.secrets:
                 try:
-                    subject = f"🤝 Permintaan Final Quotation (Nego) - {v_name}"
+                    recipients = [clean(e).lower() for e in str(v_email).split(";") if clean(e)]
+                    target_info = (
+                        "PIC menyertakan Target Price & estimasi Qty pada tabel penawaran di portal "
+                        "(kolom bertanda 🔒, hanya untuk referensi).\n"
+                        if has_target else ""
+                    )
                     body = (
                         f"Dear {v_name},\n\n"
                         f"Mohon dapat mengirimkan Final Quotation (harga terbaik) untuk RFQ terkait.\n"
+                        f"{target_info}"
                         f"{('Catatan dari PIC: ' + note) if note else ''}\n\n"
                         f"Silakan login ke portal dan submit ulang penawaran Anda: https://proctaco.streamlit.app/\n\n"
                         f"Salam,\nTACO Procurement Team"
                     )
+                    sender = st.secrets["email_config"].get("smtp_user", "")
                     msg = MIMEMultipart()
-                    msg["From"] = st.secrets["email_config"].get("smtp_user", "")
-                    msg["To"] = v_email
-                    msg["Subject"] = subject
+                    msg["From"] = sender
+                    msg["To"] = ", ".join(recipients)
+                    msg["Subject"] = f"🤝 Permintaan Final Quotation (Nego) - {v_name}"
                     msg.attach(MIMEText(body, "plain"))
                     server = smtplib.SMTP("smtp.gmail.com", 587)
                     server.starttls()
-                    server.login(st.secrets["email_config"].get("smtp_user", ""), st.secrets["email_config"].get("smtp_password", ""))
-                    server.sendmail(st.secrets["email_config"].get("smtp_user", ""), v_email, msg.as_string())
+                    server.login(sender, st.secrets["email_config"].get("smtp_password", ""))
+                    server.sendmail(sender, recipients, msg.as_string())
                     server.quit()
                     notified += 1
                 except Exception:
@@ -3633,28 +3685,13 @@ def render_comparison_detail(pr_info):
         weights_dict = {"Total Harga (1 PO)": 100}
     else:
         weights_dict = {"Harga": w_price, "TOP": w_top, "Lead Time": w_leadtime}
-
-    st.markdown("##### 🤝 Open Final Quotation (Nego)")
-    nego_vendors_sel = st.multiselect(
-        "Pilih vendor yang akan dimintai final quotation / negosiasi:",
-        vendor_list_sorted,
-        key=f"nego_sel_{active_id}",
-    )
-    nego_note = st.text_input("Catatan untuk vendor (opsional):", key=f"nego_note_{active_id}")
-    if st.button("📨 Kirim Permintaan Nego", use_container_width=True, disabled=not nego_vendors_sel):
-        name_to_id = {v: k for k, v in vendor_id_to_name.items()}
-        v_ids = [name_to_id[v] for v in nego_vendors_sel if v in name_to_id]
-        notified = request_nego(active_id, v_ids, nego_note)
-        st.toast(f"Permintaan nego terkirim ke {notified} vendor.", icon="🤝")
-        st.success(f"✅ Permintaan final quotation terkirim ke: {', '.join(nego_vendors_sel)}")
-        st.rerun(scope="fragment")
-
+    render_nego_section(active_id)
     st.divider()
-    render_ai_insight(
-        display_df, rfq_title_active,
-        weights=weights_dict,
-        cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
-    )
+        render_ai_insight(
+            display_df, rfq_title_active,
+            weights=weights_dict,
+            cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
+        )
 
     ai_insight_text = st.session_state.get(f"ai_insight_{rfq_title_active}", "")
     cqr_files = build_cqr_pdf_files(
@@ -3663,6 +3700,91 @@ def render_comparison_detail(pr_info):
         summary_df, split_data, highlight_map, grand_total_vendors,
         df_m, split_mode, split_alloc_rows,
     )
+
+def render_nego_section(active_id):
+    st.markdown("##### 🤝 Open Final Quotation (Tahap 2)")
+
+    by_vendor = {}
+    for a in get_nego_candidates(active_id):
+        by_vendor.setdefault(a["vendor_id"], []).append(a)
+    if not by_vendor:
+        return
+
+    def _vname(vid):
+        return (by_vendor[vid][0].get("profiles") or {}).get("vendor_name", "Vendor")
+
+    eligible = [v for v, rows in by_vendor.items()
+                if max((r.get("current_round") or 1) for r in rows) < MAX_NEGO_ROUND]
+    already = [_vname(v) for v in by_vendor if v not in eligible]
+    if already:
+        st.caption("ℹ️ Sudah di tahap 2 (nego dibatasi sampai tahap 2): " + ", ".join(already))
+    if not eligible:
+        return
+
+    sel = st.multiselect("Pilih vendor yang dibuka tahap 2:", eligible,
+                         format_func=_vname, key=f"nego_sel_{active_id}")
+    mode = st.radio(
+        "Mode tahap 2:", ["Open Quote", "Input Target Price"], horizontal=True,
+        key=f"nego_mode_{active_id}",
+        help="Open Quote: vendor cukup edit harga. Input Target Price: vendor melihat target harga & estimasi qty (read-only).",
+    )
+    note = st.text_input("Catatan untuk vendor (opsional):", key=f"nego_note_{active_id}")
+
+    targets = None
+    if sel and mode == "Input Target Price":
+        rows = []
+        for vid in sel:
+            for a in by_vendor[vid]:
+                it = a.get("pr_items") or {}
+                d1 = str(it.get("description") or "").strip()
+                d2 = str(it.get("description2") or "").strip()
+                full = f"{d1} - {d2}" if (d1 and d2 and d1 != d2) else (d1 or d2 or "-")
+                first = [q.get("unit_price") for q in (a.get("quotes") or []) if (q.get("round") or 1) == 1]
+                qty = float(it.get("quantity") or 0)
+                rows.append({
+                    "assignment_id": a["id"],
+                    "Vendor": _vname(vid),
+                    "Barang": clean_description(full),
+                    "UOM": it.get("uom"),
+                    "Qty Awal": qty,
+                    "Harga Tahap 1": float(first[0]) if first else float("nan"),
+                    "Target Price (IDR)": float("nan"),
+                    "Qty Estimasi": qty,
+                })
+        df_t = pd.DataFrame(rows)
+        st.caption("Isi Target Price & Qty Estimasi per vendor. Target Price boleh dikosongkan untuk item tertentu.")
+        edited_t = st.data_editor(
+            df_t, hide_index=True, use_container_width=True,
+            key=f"nego_tgt_{active_id}_{'-'.join(sorted(map(str, sel)))}",
+            disabled=["Vendor", "Barang", "UOM", "Qty Awal", "Harga Tahap 1"],
+            column_config={
+                "assignment_id": None,
+                "Harga Tahap 1": st.column_config.NumberColumn(format="Rp %,d"),
+                "Target Price (IDR)": st.column_config.NumberColumn(format="Rp %,d", min_value=0, step=1000),
+                "Qty Estimasi": st.column_config.NumberColumn(min_value=0),
+            },
+        )
+
+        chk = edited_t.groupby("Barang").agg(awal=("Qty Awal", "first"), est=("Qty Estimasi", "sum"))
+        bad = chk[(chk["est"] - chk["awal"]).abs() > 1e-9]
+        if not bad.empty:
+            st.caption("⚠️ Total Qty Estimasi ≠ Qty Awal untuk: " + ", ".join(bad.index) + " (info saja, tetap bisa dikirim).")
+
+        targets = {}
+        for _, r in edited_t.iterrows():
+            tp = r["Target Price (IDR)"]
+            targets[r["assignment_id"]] = {
+                "price": None if pd.isna(tp) else float(tp),
+                "qty": float(r["Qty Estimasi"]) if not pd.isna(r["Qty Estimasi"]) else None,
+            }
+
+    if st.button("📨 Kirim Permintaan Nego", use_container_width=True,
+                 disabled=not sel, key=f"nego_send_{active_id}"):
+        notified = request_nego(active_id, sel, note, targets=targets)
+        st.toast(f"Permintaan nego terkirim ke {notified} vendor.", icon="🤝")
+        st.rerun(scope="fragment")
+
+    
 
     # -----------------------------------------------------------------
     # 📜 AWARDING: Download CQR -> Download SPK -> Upload SPK approved -> Close
@@ -4863,6 +4985,8 @@ def vendor_portal(vendor_id):
 
             table_rows = []
             ass_map = {}
+            targets_map = get_targets_map([a["id"] for a in group["rows"]], current_round) if current_round > 1 else {}
+            has_targets = bool(targets_map)
             for a in group["rows"]:
                 item = a.get("pr_items") or {}
 
@@ -4879,7 +5003,7 @@ def vendor_portal(vendor_id):
 
                 rk = f"pr{len(table_rows)}"
                 ass_map[rk] = a["id"]
-                table_rows.append({
+                row = {
                     "row_key": rk,
                     "Tipe": "Item PR",
                     "Barang": clean_item_name,
@@ -4887,11 +5011,18 @@ def vendor_portal(vendor_id):
                     "Qty": item.get("quantity", 0),
                     "UOM": item.get("uom", "-"),
                     "Unit Price (IDR)": (ocr_row.get("unit_price") if ocr_row else None) or last_quote.get("unit_price", 0),
+                }
+                if has_targets:
+                    t = targets_map.get(a["id"], {})
+                    row["Target Price (TACO)"] = t.get("target_price")
+                    row["Qty Estimasi (TACO)"] = t.get("target_qty")
+                row.update({
                     "Brand": (ocr_row.get("brand") if ocr_row else None) or last_quote.get("brand", "-"),
                     "Ready Stock": (ocr_row.get("ready_stock") if ocr_row else None) or last_quote.get("ready_stock", "Ya"),
                     "Lead Time (Hari)": (ocr_row.get("lead_time_days") if ocr_row else None) or last_quote.get("lead_time_days", 7),
                     "Warranty": (ocr_row.get("warranty") if ocr_row else None) or last_quote.get("warranty", "-"),
                 })
+                table_rows.append(row)
 
             # ---- baris tambahan: dari OCR kalau ada, kalau tidak dari data tersimpan ----
             if ocr_extras:
@@ -4949,8 +5080,37 @@ def vendor_portal(vendor_id):
             )
 
             editor_suffix = f"{active_rfq_id}_{len(ocr_result)}_{len(extra_src)}"
+            if has_targets:
+                st.info("🎯 PIC menyertakan **Target Price** dan **Estimasi Qty** (kolom bertanda 🔒, tidak bisa diedit). "
+                        "Silakan isi harga final Anda di kolom ✏️ Unit Price.")
 
             st.markdown("**Item PR** (baris tidak bisa dihapus)")
+            locked_cols = ["Tipe", "Barang", "Qty", "UOM"] + (
+                ["Target Price (TACO)", "Qty Estimasi (TACO)"] if has_targets else []
+            )
+            col_cfg = {
+                "row_key": None,
+                "Tipe": st.column_config.TextColumn("Tipe", width="small"),
+                "Barang": st.column_config.TextColumn("Barang", width=280),
+                "Spesifikasi": st.column_config.TextColumn("Spesifikasi", width="medium"),
+                "Qty": st.column_config.NumberColumn("Qty", width="small"),
+                "UOM": st.column_config.TextColumn("UOM", width="small"),
+                "Unit Price (IDR)": st.column_config.NumberColumn(
+                    "✏️ Unit Price (IDR) — ISI DI SINI" if has_targets else "Unit Price (IDR)",
+                    format="Rp %,d", min_value=0, step=1000),
+                "Brand": st.column_config.TextColumn("Brand"),
+                "Ready Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=False),
+                "Lead Time (Hari)": st.column_config.NumberColumn("Lead Time (Hari)", min_value=1, step=1),
+                "Warranty": st.column_config.TextColumn("Warranty", width="small", help="Contoh: 1 Tahun, 6 Bulan, atau '-' kalau tidak ada"),
+            }
+            if has_targets:
+                col_cfg["Target Price (TACO)"] = st.column_config.NumberColumn(
+                    "🔒 Target Price (TACO)", format="Rp %,d", disabled=True,
+                    help="Ditentukan TACO sebagai acuan. Kolom ini TIDAK bisa diedit.")
+                col_cfg["Qty Estimasi (TACO)"] = st.column_config.NumberColumn(
+                    "🔒 Qty Estimasi (TACO)", disabled=True,
+                    help="Estimasi pembagian qty dari TACO. Kolom ini TIDAK bisa diedit.")
+
             pr_edit = st.data_editor(
                 df_pr_part,
                 key=f"editor_v_pr_{editor_suffix}",
@@ -4958,20 +5118,8 @@ def vendor_portal(vendor_id):
                 hide_index=True,
                 use_container_width=True,
                 row_height=80,
-                disabled=["Tipe", "Barang", "Qty", "UOM"],
-                column_config={
-                    "row_key": None,
-                    "Tipe": st.column_config.TextColumn("Tipe", width="small"),
-                    "Barang": st.column_config.TextColumn("Barang", width=280),
-                    "Spesifikasi": st.column_config.TextColumn("Spesifikasi", width="medium"),
-                    "Qty": st.column_config.NumberColumn("Qty", width="small"),
-                    "UOM": st.column_config.TextColumn("UOM", width="small"),
-                    "Unit Price (IDR)": st.column_config.NumberColumn("Unit Price (IDR)", format="Rp %,d", min_value=0, step=1000),
-                    "Brand": st.column_config.TextColumn("Brand"),
-                    "Ready Stock": st.column_config.SelectboxColumn("Ready Stock", options=["Ya", "Tidak"], required=False),
-                    "Lead Time (Hari)": st.column_config.NumberColumn("Lead Time (Hari)", min_value=1, step=1),
-                    "Warranty": st.column_config.TextColumn("Warranty", width="small", help="Contoh: 1 Tahun, 6 Bulan, atau '-' kalau tidak ada"),
-                },
+                disabled=locked_cols,
+                column_config=col_cfg,
             )
 
             st.markdown("**➕ Biaya / Komponen Tambahan** (opsional, klik baris kosong paling bawah untuk menambah)")
