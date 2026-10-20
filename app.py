@@ -3685,6 +3685,7 @@ def render_comparison_detail(pr_info):
         weights_dict = {"Total Harga (1 PO)": 100}
     else:
         weights_dict = {"Harga": w_price, "TOP": w_top, "Lead Time": w_leadtime}
+    
     render_nego_section(active_id)
     st.divider()
         render_ai_insight(
