@@ -3793,17 +3793,6 @@ def render_nego_section(active_id):
         st.toast(f"Permintaan nego terkirim ke {notified} vendor.", icon="🤝")
         st.rerun(scope="fragment")
 
-    
-
-    # -----------------------------------------------------------------
-    # 📜 AWARDING: Download CQR -> Download SPK -> Upload SPK approved -> Close
-    # -----------------------------------------------------------------
-    st.divider()
-    render_awarding_section(
-        pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map,
-        pivot_items, df_m, vendor_id_to_name, cqr_files=cqr_files,
-        ai_included=bool(ai_insight_text),
-    )
 
 
 def proc_portal_comparison():
