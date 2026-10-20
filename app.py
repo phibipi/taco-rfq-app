@@ -3687,12 +3687,13 @@ def render_comparison_detail(pr_info):
         weights_dict = {"Harga": w_price, "TOP": w_top, "Lead Time": w_leadtime}
     
     render_nego_section(active_id)
+
     st.divider()
-        render_ai_insight(
-            display_df, rfq_title_active,
-            weights=weights_dict,
-            cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
-        )
+    render_ai_insight(
+        display_df, rfq_title_active,
+        weights=weights_dict,
+        cost_saving=cost_saving, saving_pct=saving_pct, recommended_total=recommended_total,
+    )
 
     ai_insight_text = st.session_state.get(f"ai_insight_{rfq_title_active}", "")
     cqr_files = build_cqr_pdf_files(
@@ -3700,6 +3701,13 @@ def render_comparison_detail(pr_info):
         display_df, cost_saving, saving_pct, recommended_total, ai_insight_text,
         summary_df, split_data, highlight_map, grand_total_vendors,
         df_m, split_mode, split_alloc_rows,
+    )
+
+    st.divider()
+    render_awarding_section(
+        pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map,
+        pivot_items, df_m, vendor_id_to_name, cqr_files=cqr_files,
+        ai_included=bool(ai_insight_text),
     )
 
 def render_nego_section(active_id):
