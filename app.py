@@ -1907,47 +1907,64 @@ def generate_spk_for_winners(pr_info, winner_items, df_m, vendor_id_to_name):
 
 
 def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, vendor_id_to_name, pivot_items):
-    """Eksekusi final: kirim email Awarding (lampiran = SPK APPROVED yang diupload PIC) + Thank You,
-    update status assignment -> Submitted, dan ARSIPKAN RFQ. Return True kalau sukses."""
+    """Eksekusi final: kirim email Awarding (lampiran = SPK dari template_awarding [otomatis]
+    + PO yang diupload PIC) ke pemenang, Thank You ke yang kalah, update status, lalu ARSIPKAN RFQ."""
     rfq_title = pr_info.get("rfq_title") or pr_info["pr_code"]
     tanggal_now = datetime.now().strftime("%d %B %Y")
     name_to_id = {v: k for k, v in vendor_id_to_name.items()}
 
-    # Pastikan SPK approved semua vendor pemenang sudah ada
-    missing = [v for v in winner_items if not (name_to_id.get(v) and get_spk_document(pr_info["id"], name_to_id[v]))]
+    # ---------- 1. VALIDASI & SIAPKAN LAMPIRAN (belum kirim apa pun) ----------
+    # a) PO tiap pemenang harus sudah diupload
+    po_files = {}
+    missing = []
+    for v_name in winner_items:
+        v_id = name_to_id.get(v_name)
+        po_doc = get_po_document(pr_info["id"], v_id) if v_id else None
+        if not po_doc:
+            missing.append(v_name)
+            continue
+        try:
+            po_files[v_name] = (po_doc["file_name"], sb.storage.from_(BUCKET_NAME).download(po_doc["file_path"]))
+        except Exception as e:
+            st.error(f"❌ Gagal mengambil PO {v_name}: {e}")
+            return False
     if missing:
-        st.error("❌ SPK approved belum diupload untuk: " + ", ".join(missing))
+        st.error("❌ PO belum diupload untuk: " + ", ".join(missing))
         return False
 
-    # A. Kirim ke Vendor Pemenang (lampiran = SPK approved)
+    # b) SPK di-generate otomatis dari template_awarding (selalu nempel)
+    spk_files = generate_spk_for_winners(pr_info, winner_items, df_m, vendor_id_to_name)
+    failed = [v for v in winner_items if not (spk_files.get(v) or {}).get("bytes")]
+    if failed:
+        st.error("❌ Gagal membuat SPK untuk: " + ", ".join(failed)
+                 + " — " + "; ".join(str((spk_files.get(v) or {}).get("err")) for v in failed))
+        return False
+
+    # ---------- 2. KIRIM EMAIL KE PEMENANG (SPK + PO) ----------
     for v_name, items in winner_items.items():
         v_id = name_to_id.get(v_name)
-        spk_doc = get_spk_document(pr_info["id"], v_id)
-        try:
-            spk_bytes = sb.storage.from_(BUCKET_NAME).download(spk_doc["file_path"])
-        except Exception as e:
-            st.warning(f"⚠️ Gagal mengambil SPK approved {v_name}: {e}")
-            continue
-
         v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute()
         v_email = v_prof.data.get("email") if (v_prof and v_prof.data) else None
         if not v_email:
+            st.warning(f"⚠️ Email {v_name} kosong, awarding tidak terkirim.")
             continue
 
         total_amount = sum(it["total"] for it in items)
-        items_text = "\n".join(
-            f"- {it['barang']} ({it['qty']} {it['uom']}) @ Rp {it['unit_price']:,.0f} = Rp {it['total']:,.0f}".replace(",", ".")
-            for it in items
-        )
         email_body = DEFAULT_AWARDING_EMAIL_TEMPLATE.format(
             vendor_name=v_name, rfq_title=rfq_title,
-            awarding_items_text=items_text,
             total_amount=f"{total_amount:,.0f}".replace(",", "."),
         )
-        attachments = [(f"SPK_{_safe_filename(rfq_title)}_{_safe_filename(v_name)}.pdf", spk_bytes)]
+
+        spk = spk_files[v_name]
+        po_name, po_bytes = po_files[v_name]
+        po_ext = os.path.splitext(po_name)[1] or ".pdf"
+        attachments = [
+            (f"SPK_{_safe_filename(rfq_title)}_{_safe_filename(v_name)}.{spk['ext']}", spk["bytes"]),
+            (f"PO_{_safe_filename(rfq_title)}_{_safe_filename(v_name)}{po_ext}", po_bytes),
+        ]
         send_custom_email(v_email, f"🎉 AWARDING LETTER - RFQ: {rfq_title}", email_body, attachments)
 
-    # B. Kirim Email Thank You ke Vendor Lain
+    # ---------- 3. THANK YOU KE VENDOR YANG KALAH (tidak berubah) ----------
     for v_name in losing_vendors:
         v_id = name_to_id.get(v_name)
         v_prof = sb.table("profiles").select("email").eq("id", v_id).single().execute() if v_id else None
@@ -1960,13 +1977,13 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
             attachments = [(f"Thank_You_Letter_{v_name}.pdf", pdf_thanks_bytes)] if pdf_thanks_bytes else None
             send_custom_email(v_email, f"Hasil Evaluasi RFQ: {rfq_title}", email_body, attachments)
 
-    # C. Update status assignment -> Submitted (otomatis masuk History)
+    # ---------- 4. UPDATE STATUS -> Submitted ----------
     items_res = sb.table("pr_items").select("id").eq("pr_id", pr_info["id"]).execute()
     item_ids = [i["id"] for i in items_res.data] if items_res.data else []
     if item_ids:
         sb.table("rfq_assignments").update({"status": "Submitted"}).in_("item_id", item_ids).execute()
 
-    # D. ARSIPKAN RFQ -> hilang dari daftar Price Comparison
+    # ---------- 5. ARSIPKAN RFQ ----------
     try:
         sb.table("purchase_requests").update({"is_archived": True}).eq("id", pr_info["id"]).execute()
     except Exception as e:
@@ -1978,7 +1995,7 @@ def _execute_close_and_archive_rfq(pr_info, winner_items, losing_vendors, df_m, 
 def _confirm_close_rfq_dialog(pr_info, winner_items, losing_vendors, df_m, vendor_id_to_name, pivot_items):
     st.write(
         f"Apakah Anda ingin menutup dan mengarsipkan RFQ **{pr_info.get('rfq_title') or pr_info['pr_code']}** ini? "
-        "Email Awarding (dengan lampiran SPK approved) ke vendor pemenang dan Thank You ke vendor lain akan langsung dikirim, "
+        "Email Awarding (lampiran Surat Penunjukan + PO) ke vendor pemenang dan Thank You ke vendor lain akan langsung dikirim, "
         "dan RFQ ini akan hilang dari Price Comparison (tetap bisa dilihat di History RFQ)."
     )
     c1, c2 = st.columns(2)
@@ -2016,7 +2033,7 @@ def attach_extras_to_winners(pr_id, winner_items, vendor_id_to_name):
 def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_map, split_allocation_map, pivot_items, df_m, vendor_id_to_name, cqr_files=None, ai_included=False):
     pr_id = pr_info["id"]
     st.markdown("##### 📜 Awarding & Final Close RFQ")
-    st.caption("Alur: **① Download Price COmparison → ② Download SPK → ③ Upload SPK approved → ④ Close RFQ & kirim email.**")
+    st.caption("Alur: **① Download Price Comparison → ② Upload PO → ③ Close RFQ & kirim email** (SPK otomatis dilampirkan).")
 
     winner_items, losing_vendors = _identify_winners_and_losers(
         pivot_items, df_m, split_toggle_map, split_allocation_map, recommended_vendor_per_item
@@ -2024,9 +2041,7 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
     winner_items = attach_extras_to_winners(pr_id, winner_items, vendor_id_to_name)
     name_to_id = {v: k for k, v in vendor_id_to_name.items()}
 
-
-
-    # ① Download CQR
+    # ① Download Price Comparison
     st.markdown("**① Download Price Comparison**")
     if cqr_files:
         if ai_included:
@@ -2043,53 +2058,52 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
     else:
         st.caption("⚠️ Library `reportlab` belum terinstall.")
 
-    # ② Download SPK
-    st.markdown("**② Download SPK (untuk ditandatangani)**")
-    spk_key = f"spk_gen_{pr_id}"
-    if st.button("📄 Generate SPK", key=f"gen_spk_{pr_id}", use_container_width=True):
-        with st.spinner("Membuat SPK untuk semua vendor pemenang..."):
-            st.session_state[spk_key] = generate_spk_for_winners(pr_info, winner_items, df_m, vendor_id_to_name)
-    st.caption("Klik Generate lagi kalau ada perubahan pemenang / qty / data vendor.")
-    rfq_fn = _safe_filename(pr_info.get("rfq_title") or pr_info["pr_code"])
-    generated = st.session_state.get(spk_key, {})
-    for v_name in winner_items:
-        g = generated.get(v_name)
-        if g and g.get("bytes"):
-            st.download_button(
-                f"⬇️ SPK — {v_name}", g["bytes"],
-                f"SPK_{rfq_fn}_{_safe_filename(v_name)}.{g['ext']}",
-                key=f"dl_spk_{pr_id}_{v_name}", use_container_width=True,
-            )
-        elif g:
-            st.warning(f"Gagal membuat SPK {v_name}: {g.get('err')}")
-
-    # ③ Upload SPK approved
-    st.markdown("**③ Upload SPK Approved**")
-    spk_status = {}
+    # ② Upload PO
+    st.markdown("**② Upload PO (untuk vendor pemenang)**")
+    po_status = {}
     for v_name in winner_items:
         v_id = name_to_id.get(v_name)
-        spk_status[v_name] = get_spk_document(pr_id, v_id) if v_id else None
+        po_status[v_name] = get_po_document(pr_id, v_id) if v_id else None
         with st.container(border=True):
             st.write(f"**{v_name}**")
-            if spk_status[v_name]:
-                st.caption(f"✅ Tersimpan: {spk_status[v_name]['file_name']} (upload lagi untuk mengganti)")
+            if po_status[v_name]:
+                st.caption(f"✅ Tersimpan: {po_status[v_name]['file_name']} (upload lagi untuk mengganti)")
             else:
-                st.caption("⏳ Belum ada SPK approved")
-            up = st.file_uploader(f"SPK approved — {v_name}", type=["pdf"], key=f"spk_up_{pr_id}_{v_id}")
-            if up is not None and st.button("💾 Simpan SPK Approved", key=f"spk_save_{pr_id}_{v_id}"):
-                ok, err = save_spk_approved(pr_id, v_id, up)
+                st.caption("⏳ Belum ada PO")
+            up = st.file_uploader(f"PO — {v_name}", type=["pdf"], key=f"po_up_{pr_id}_{v_id}")
+            if up is not None and st.button("💾 Simpan PO", key=f"po_save_{pr_id}_{v_id}"):
+                ok, err = save_po_document(pr_id, v_id, up)
                 if ok:
-                    st.success("SPK approved tersimpan.")
+                    st.success("PO tersimpan.")
                     st.rerun(scope="fragment")
                 else:
                     st.error(f"Gagal menyimpan: {err}")
 
-    # ④ Close
-    st.markdown("**④ Close RFQ & Kirim Email**")
+    # (Opsional) preview SPK -- SPK tetap OTOMATIS ikut terkirim saat Close, ini cuma buat dicek dulu
+    with st.expander("👁️ Preview SPK (opsional — SPK otomatis dilampirkan saat Close)"):
+        spk_key = f"spk_gen_{pr_id}"
+        if st.button("📄 Generate Preview SPK", key=f"gen_spk_{pr_id}", use_container_width=True):
+            with st.spinner("Membuat SPK untuk semua vendor pemenang..."):
+                st.session_state[spk_key] = generate_spk_for_winners(pr_info, winner_items, df_m, vendor_id_to_name)
+        rfq_fn = _safe_filename(pr_info.get("rfq_title") or pr_info["pr_code"])
+        generated = st.session_state.get(spk_key, {})
+        for v_name in winner_items:
+            g = generated.get(v_name)
+            if g and g.get("bytes"):
+                st.download_button(
+                    f"⬇️ SPK — {v_name}", g["bytes"],
+                    f"SPK_{rfq_fn}_{_safe_filename(v_name)}.{g['ext']}",
+                    key=f"dl_spk_{pr_id}_{v_name}", use_container_width=True,
+                )
+            elif g:
+                st.warning(f"Gagal membuat SPK {v_name}: {g.get('err')}")
+
+    # ③ Close
+    st.markdown("**③ Close RFQ & Kirim Email**")
     c_w, c_l = st.columns(2)
     pic_profile_awd = get_pic_profile(pr_info)
     with c_w:
-        st.write("**🏆 Vendor Pemenang (Email + SPK approved):**")
+        st.write("**🏆 Vendor Pemenang (Email + SPK + PO):**")
         for v_name, items in winner_items.items():
             tot = sum(it["total"] for it in items)
             sg_name, sg_title = resolve_spk_signer(tot, pic_profile_awd)
@@ -2100,9 +2114,9 @@ def render_awarding_section(pr_info, recommended_vendor_per_item, split_toggle_m
         st.write("**🙏 Vendor Lain (Email Thank You Letter):**")
         for v_name in losing_vendors:
             st.caption(f"• **{v_name}**")
-    all_uploaded = bool(winner_items) and all(spk_status.values())
+    all_uploaded = bool(winner_items) and all(po_status.values())
     if not all_uploaded:
-        st.caption("🔒 Tombol aktif setelah SPK approved semua vendor pemenang terupload.")
+        st.caption("🔒 Tombol aktif setelah PO semua vendor pemenang terupload.")
     if st.button("🚀 Close RFQ & Auto-Send Email Notification", type="primary", use_container_width=True, disabled=not all_uploaded):
         _confirm_close_rfq_dialog(pr_info, winner_items, losing_vendors, df_m, vendor_id_to_name, pivot_items)
 
